@@ -6,6 +6,7 @@ import {
   StickerFormatType,
 } from "discord-api-types/v10";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { setDiscordProviderEndpointDescriptor } from "../../api.js";
 import type { Message } from "../internal/discord.js";
 
 const readRemoteMediaBuffer = vi.fn();
@@ -53,8 +54,14 @@ beforeAll(async () => {
   ({ resolveForwardedMediaList, resolveMediaList } = await import("./message-utils.js"));
 });
 
-afterEach(() => vi.restoreAllMocks());
-beforeEach(() => vi.resetAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  setDiscordProviderEndpointDescriptor(undefined);
+});
+beforeEach(() => {
+  vi.resetAllMocks();
+  setDiscordProviderEndpointDescriptor(undefined);
+});
 
 function asMessage(payload: Record<string, unknown>): Message {
   return payload as unknown as Message;
@@ -307,6 +314,29 @@ describe("resolveForwardedMediaList", () => {
 });
 
 describe("resolveMediaList", () => {
+  it("allows inbound attachments only at the configured provider REST origin", async () => {
+    setDiscordProviderEndpointDescriptor({
+      restApiBaseUrl: "http://127.0.0.1:43123/custom/rest/v10",
+      gatewayBotUrl: "http://127.0.0.1:43123/custom/gateway-metadata",
+      gatewayOrigin: "ws://127.0.0.1:43124",
+    });
+    const attachmentUrl = "http://127.0.0.1:43123/custom/media/image.png";
+    const attachment = attachmentFixture("att-provider", "image.png", { url: attachmentUrl });
+    mockDownload("/tmp/provider-image.png");
+
+    const result = await resolveMediaList(asMessage({ attachments: [attachment] }), 512);
+
+    expect(result).toEqual([{ path: "/tmp/provider-image.png", contentType: "image/png" }]);
+    const call = fetchParams();
+    expect(call.url).toBe(attachmentUrl);
+    expect(call.maxRedirects).toBe(0);
+    const policy = requireRecord(call.ssrfPolicy, "provider media ssrf policy");
+    expect(requireArray(policy.allowedOrigins, "allowed origins")).toContain(
+      "http://127.0.0.1:43123",
+    );
+    expect(requireArray(policy.hostnameAllowlist, "hostname allowlist")).toContain("127.0.0.1");
+  });
+
   it("downloads stickers", async () => {
     const sticker = stickerFixture("sticker-2", "hello");
     mockDownload("/tmp/sticker-2.png", { buffer: "sticker" });
