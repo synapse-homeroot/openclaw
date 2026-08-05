@@ -154,7 +154,7 @@ function buildHarnessMcpTools(params: {
   includeAppTools: boolean;
   liveRuntime?: Awaited<ReturnType<typeof materializeBundleMcpToolsForRun>>;
   materialization: MaterializeConfiguredMcpToolsForHarnessRunParams;
-}): ConfiguredHarnessMcpTools {
+}): { materialized: ConfiguredHarnessMcpTools; hasProjectedSurface: boolean } {
   const reservedToolNames = params.materialization.reservedToolNames
     ? Array.from(params.materialization.reservedToolNames)
     : undefined;
@@ -162,33 +162,42 @@ function buildHarnessMcpTools(params: {
     catalog: params.advertisedCatalog,
     reservedToolNames,
     createExecute: (tool) => async () => notConnectedToolResult(tool.serverName, tool.toolName),
+    createResourceListExecute: (serverName) => async () =>
+      notConnectedToolResult(serverName, "resources_list"),
+    createResourceReadExecute: (serverName) => async () =>
+      notConnectedToolResult(serverName, "resources_read"),
+    createPromptListExecute: (serverName) => async () =>
+      notConnectedToolResult(serverName, "prompts_list"),
+    createPromptGetExecute: (serverName) => async () =>
+      notConnectedToolResult(serverName, "prompts_get"),
   });
   const liveByName = new Map((params.liveRuntime?.tools ?? []).map((tool) => [tool.name, tool]));
   const tools = advertisedTools.map((tool) => liveByName.get(tool.name) ?? tool);
   const filteredTools = applyHarnessToolPolicy(tools, params.materialization);
   const filteredAdvertised = applyHarnessToolPolicy(advertisedTools, params.materialization);
-  const filteredAppTools = params.includeAppTools
-    ? applyHarnessToolPolicy(
-        params.liveRuntime?.appTools ?? params.liveRuntime?.tools ?? [],
-        params.materialization,
-      )
+  const projectedAppTools = params.includeAppTools
+    ? (params.liveRuntime?.appTools ?? params.liveRuntime?.tools ?? [])
     : [];
+  const filteredAppTools = applyHarnessToolPolicy(projectedAppTools, params.materialization);
   const allowedNames = new Set(filteredAdvertised.map((tool) => tool.name));
   const executableTools = filteredTools.filter((tool) => allowedNames.has(tool.name));
 
   let disposed = false;
   return {
-    tools: executableTools,
-    advertisedTools: filteredAdvertised,
-    appTools: filteredAppTools,
-    diagnostics: params.liveRuntime?.diagnostics,
-    restrictAppTools: params.liveRuntime?.restrictAppTools,
-    dispose: async () => {
-      if (disposed) {
-        return;
-      }
-      disposed = true;
-      await params.liveRuntime?.dispose();
+    hasProjectedSurface: advertisedTools.length > 0 || projectedAppTools.length > 0,
+    materialized: {
+      tools: executableTools,
+      advertisedTools: filteredAdvertised,
+      appTools: filteredAppTools,
+      diagnostics: params.liveRuntime?.diagnostics,
+      restrictAppTools: params.liveRuntime?.restrictAppTools,
+      dispose: async () => {
+        if (disposed) {
+          return;
+        }
+        disposed = true;
+        await params.liveRuntime?.dispose();
+      },
     },
   };
 }
@@ -245,17 +254,17 @@ export async function materializeConfiguredMcpToolsForHarnessRun(
     const advertisedCatalog = mergeMcpToolCatalogs(
       advertisedRequesterCatalog ? [staticCatalog, advertisedRequesterCatalog] : [staticCatalog],
     );
-    if (advertisedCatalog.tools.length === 0) {
-      await liveRuntime.dispose();
-      return undefined;
-    }
-
-    return buildHarnessMcpTools({
+    const built = buildHarnessMcpTools({
       advertisedCatalog,
       includeAppTools: true,
       liveRuntime,
       materialization: params,
     });
+    if (!built.hasProjectedSurface) {
+      await built.materialized.dispose();
+      return undefined;
+    }
+    return built.materialized;
   } catch (error) {
     await liveRuntime.dispose();
     throw error;
@@ -284,21 +293,25 @@ export async function materializeRequesterScopedMcpToolsForHarnessRun(
     }
 
     const advertisedCatalog = getAdvertisedScopedMcpCatalog(params.sessionId);
-    if (!advertisedCatalog || advertisedCatalog.tools.length === 0) {
+    if (!advertisedCatalog) {
       await liveRuntime?.dispose();
       return undefined;
     }
 
-    const materialized = buildHarnessMcpTools({
+    const built = buildHarnessMcpTools({
       advertisedCatalog,
       includeAppTools: false,
       liveRuntime,
       materialization: params,
     });
+    if (!built.hasProjectedSurface) {
+      await built.materialized.dispose();
+      return undefined;
+    }
     return {
-      tools: materialized.tools,
-      advertisedTools: materialized.advertisedTools,
-      dispose: materialized.dispose,
+      tools: built.materialized.tools,
+      advertisedTools: built.materialized.advertisedTools,
+      dispose: built.materialized.dispose,
     };
   } catch (error) {
     await liveRuntime?.dispose();

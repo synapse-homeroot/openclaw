@@ -86,6 +86,8 @@ function makeRuntime(params: {
   requesterSenderId?: string;
   empty?: boolean;
   appOnly?: boolean;
+  utilityOnly?: boolean;
+  excludeAllUtilities?: boolean;
 }): SessionMcpRuntime {
   const serverName = "user-mail";
   const catalog: McpToolCatalog = {
@@ -94,23 +96,32 @@ function makeRuntime(params: {
     servers: {
       [serverName]: {
         serverName,
+        safeServerName: serverName,
         launchSummary: serverName,
-        toolCount: 1,
+        toolCount: params.utilityOnly ? 0 : 1,
+        ...(params.utilityOnly
+          ? {
+              resources: { listChanged: false },
+              prompts: { listChanged: false },
+              ...(params.excludeAllUtilities ? { toolFilter: { exclude: ["*"] } } : {}),
+            }
+          : {}),
       },
     },
-    tools: params.empty
-      ? []
-      : [
-          {
-            serverName,
-            safeServerName: serverName,
-            toolName: "inbox",
-            description: "read inbox",
-            inputSchema: { type: "object", properties: {} },
-            fallbackDescription: "read inbox",
-            ...(params.appOnly ? { uiVisibility: ["app"] } : {}),
-          },
-        ],
+    tools:
+      params.empty || params.utilityOnly
+        ? []
+        : [
+            {
+              serverName,
+              safeServerName: serverName,
+              toolName: "inbox",
+              description: "read inbox",
+              inputSchema: { type: "object", properties: {} },
+              fallbackDescription: "read inbox",
+              ...(params.appOnly ? { uiVisibility: ["app"] } : {}),
+            },
+          ],
   };
   let lastUsedAt = Date.now();
   let activeLeases = 0;
@@ -153,6 +164,10 @@ function makeRuntime(params: {
       ],
       isError: false,
     }),
+    listResources: async () => [],
+    readResource: async (_serverName, uri) => ({ contents: [{ uri, text: "memo" }] }),
+    listPrompts: async () => [],
+    getPrompt: async (_serverName, name) => ({ name, messages: [] }),
     dispose: async () => {},
   };
 }
@@ -200,6 +215,32 @@ describe("materializeRequesterScopedMcpToolsForHarnessRun", () => {
     expect(live.content[0]).toMatchObject({ text: "live:inbox:alice" });
     await requester?.dispose();
   });
+
+  it("preserves requester-scoped utility-only servers", async () => {
+    mocks.setResolveImpl(async (params) =>
+      makeRuntime({
+        sessionId: params.sessionId,
+        requesterSenderId: params.requesterSenderId ?? undefined,
+        utilityOnly: true,
+      }),
+    );
+
+    const result = await materializeRequesterScopedMcpToolsForHarnessRun({
+      sessionId: "session-legacy-utilities",
+      workspaceDir: "/workspace",
+      requesterSenderId: "alice",
+    });
+    expect(result?.advertisedTools.map((tool) => tool.name)).toEqual([
+      "user-mail__prompts_get",
+      "user-mail__prompts_list",
+      "user-mail__resources_list",
+      "user-mail__resources_read",
+    ]);
+    expect(result?.tools.map((tool) => tool.name)).toEqual(
+      result?.advertisedTools.map((tool) => tool.name),
+    );
+    await result?.dispose();
+  });
 });
 
 describe("materializeConfiguredMcpToolsForHarnessRun", () => {
@@ -235,6 +276,49 @@ describe("materializeConfiguredMcpToolsForHarnessRun", () => {
     const live = await result!.tools[0]!.execute("static", {});
     expect(live.content[0]).toMatchObject({ text: "live:inbox:static" });
     await result?.dispose();
+  });
+
+  it("preserves static resource and prompt utility-only servers", async () => {
+    mocks.setResolveImpl(async (params) =>
+      makeRuntime({ sessionId: params.sessionId, utilityOnly: true }),
+    );
+
+    const result = await materializeConfiguredMcpToolsForHarnessRun({
+      sessionId: "session-static-utilities",
+      workspaceDir: "/workspace",
+    });
+
+    expect(result?.advertisedTools.map((tool) => tool.name)).toEqual([
+      "user-mail__prompts_get",
+      "user-mail__prompts_list",
+      "user-mail__resources_list",
+      "user-mail__resources_read",
+    ]);
+    expect(result?.tools.map((tool) => tool.name)).toEqual(
+      result?.advertisedTools.map((tool) => tool.name),
+    );
+    const listed = await result!.tools
+      .find((tool) => tool.name === "user-mail__resources_list")!
+      .execute("list", {});
+    expect(listed.details).toMatchObject({ mcpServer: "user-mail" });
+    await result?.dispose();
+  });
+
+  it("drops universally filtered utility-only servers", async () => {
+    mocks.setResolveImpl(async (params) =>
+      makeRuntime({
+        sessionId: params.sessionId,
+        utilityOnly: true,
+        excludeAllUtilities: true,
+      }),
+    );
+
+    await expect(
+      materializeConfiguredMcpToolsForHarnessRun({
+        sessionId: "session-filtered-utilities",
+        workspaceDir: "/workspace",
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("keeps advertised specs stable and returns not-connected for unauthed senders", async () => {
@@ -281,6 +365,47 @@ describe("materializeConfiguredMcpToolsForHarnessRun", () => {
         ? notConnected.content[0].text
         : "";
     expect(text).toMatch(/has not connected MCP server/i);
+    await guest!.dispose();
+  });
+
+  it("keeps requester utility specs stable with actionable guest stubs", async () => {
+    mocks.setResolveImpl(async (params) =>
+      params.requesterSenderId === "authed"
+        ? makeRuntime({
+            sessionId: params.sessionId,
+            requesterSenderId: "authed",
+            utilityOnly: true,
+          })
+        : makeRuntime({ sessionId: params.sessionId, empty: true }),
+    );
+
+    const authed = await materializeConfiguredMcpToolsForHarnessRun({
+      sessionId: "session-utility-stubs",
+      workspaceDir: "/workspace",
+      requesterSenderId: "authed",
+    });
+    const advertisedNames = authed!.advertisedTools.map((tool) => tool.name);
+    expect(advertisedNames).toEqual([
+      "user-mail__prompts_get",
+      "user-mail__prompts_list",
+      "user-mail__resources_list",
+      "user-mail__resources_read",
+    ]);
+    await authed!.dispose();
+
+    const guest = await materializeConfiguredMcpToolsForHarnessRun({
+      sessionId: "session-utility-stubs",
+      workspaceDir: "/workspace",
+      requesterSenderId: "guest",
+    });
+    expect(guest?.advertisedTools.map((tool) => tool.name)).toEqual(advertisedNames);
+    const notConnected = await guest!.tools
+      .find((tool) => tool.name === "user-mail__resources_list")!
+      .execute("guest-list", {});
+    expect(notConnected.details).toMatchObject({ status: "error" });
+    expect(notConnected.content[0]).toMatchObject({
+      text: expect.stringMatching(/has not connected MCP server/i),
+    });
     await guest!.dispose();
   });
 

@@ -179,7 +179,7 @@ export function assertSupportedTurn(params: SessionPlacementTurnParams): {
   }
   if (params.scheduledNativePolicy?.mode === "inherit") {
     throw new Error(
-      "Cloud workers cannot currently preserve this scheduled turn's inherited native tool authority. Stop the cloud worker for this session, then retry locally with `openclaw gateway call sessions.reclaim`.",
+      'Cloud workers cannot preserve this scheduled turn\'s inherited native tool authority. If native access is no longer needed, reauthorize the automation with an explicit finite tool cap using `openclaw automations edit <id> --tools <tool,...>`. Otherwise, reclaim the session with `openclaw gateway call sessions.reclaim --params \'{"key":"<session-key>"}\'` and retry locally.',
     );
   }
   if (params.scheduledNativePolicy !== undefined) {

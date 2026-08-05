@@ -4,7 +4,6 @@ import {
   isHostScopedAgentToolActive,
   materializeConfiguredMcpToolsForHarnessRun,
   resolveAgentDir,
-  resolveEmbeddedAttemptToolConstructionPlan,
   supportsModelTools,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { resolveCodexMcpToolOverridesForAgent } from "openclaw/plugin-sdk/codex-mcp-projection";
@@ -152,76 +151,69 @@ export async function prepareCodexAttemptTools(runtime: CodexAttemptRuntime) {
   // remains owned by Codex, while this bridge keeps credentials inside OpenClaw.
   const mcpToolsEnabled =
     supportsModelTools(params.model) && params.modelRun !== true && params.promptMode !== "none";
-  const configuredMcpTools = !resolveEmbeddedAttemptToolConstructionPlan({
+  const configuredMcpTools = await materializeConfiguredMcpToolsForHarnessRun({
+    sessionId: params.sessionId,
+    sessionKey: params.sessionKey,
+    workspaceDir: effectiveWorkspace,
+    agentDir: agentDir ?? resolveAgentDir(params.config ?? {}, sessionAgentId),
+    cfg: params.config,
+    requesterSenderId: params.senderId,
+    agentAccountId: params.agentAccountId,
+    messageChannel: params.messageChannel ?? params.messageProvider,
+    toolOverrides: resolveCodexMcpToolOverridesForAgent(params.config, {
+      agentId: sessionAgentId,
+      toolOverrides: params.toolOverrides,
+    }),
     toolsEnabled: mcpToolsEnabled,
     disableTools: params.disableTools,
-    isRawModelRun: params.modelRun === true || params.promptMode === "none",
+    reservedToolNames: [
+      ...tools.map((tool) => tool.name),
+      ...registeredTools.map((tool) => tool.name),
+    ],
     toolsAllow: params.toolsAllow,
-  }).codingToolConstructionPlan.includePluginTools
-    ? undefined
-    : await materializeConfiguredMcpToolsForHarnessRun({
-        sessionId: params.sessionId,
-        sessionKey: params.sessionKey,
-        workspaceDir: effectiveWorkspace,
-        agentDir: agentDir ?? resolveAgentDir(params.config ?? {}, sessionAgentId),
-        cfg: params.config,
-        requesterSenderId: params.senderId,
-        agentAccountId: params.agentAccountId,
-        messageChannel: params.messageChannel ?? params.messageProvider,
-        toolOverrides: resolveCodexMcpToolOverridesForAgent(params.config, {
-          agentId: sessionAgentId,
-          toolOverrides: params.toolOverrides,
-        }),
-        toolsEnabled: mcpToolsEnabled,
-        disableTools: params.disableTools,
-        reservedToolNames: [
-          ...tools.map((tool) => tool.name),
-          ...registeredTools.map((tool) => tool.name),
-        ],
-        toolsAllow: params.toolsAllow,
-        policyContext: {
-          config: params.config,
-          sessionKey: sandboxSessionKey,
-          runSessionKey:
-            params.sessionKey && params.sessionKey !== sandboxSessionKey
-              ? params.sessionKey
-              : undefined,
-          sessionId: params.sessionId,
-          runId: params.runId,
-          agentId: sessionAgentId,
-          agentDir: agentDir ?? resolveAgentDir(params.config ?? {}, sessionAgentId),
-          agentAccountId: params.agentAccountId,
-          scheduledToolPolicy: params.scheduledToolPolicy,
-          messageProvider: params.messageProvider ?? params.messageChannel,
-          messageChannel: params.messageChannel,
-          chatType: params.chatType,
-          messageTo: params.messageTo,
-          messageThreadId: params.messageThreadId,
-          currentChannelId: params.currentChannelId,
-          currentMessagingTarget: params.currentMessagingTarget,
-          currentThreadTs: params.currentThreadTs,
-          currentMessageId: params.currentMessageId,
-          groupId: params.groupId,
-          groupChannel: params.groupChannel,
-          groupSpace: params.groupSpace,
-          memberRoleIds: params.memberRoleIds,
-          spawnedBy: params.spawnedBy,
-          senderId: params.senderId,
-          senderName: params.senderName,
-          senderUsername: params.senderUsername,
-          senderE164: params.senderE164,
-          senderIsOwner: params.senderIsOwner,
-          modelProvider: params.provider,
-          modelId: params.modelId,
-          modelApi: params.model.api,
-          modelContextWindowTokens: params.model.contextWindow,
-          modelHasVision: params.model.input?.includes("image") ?? false,
-          workspaceDir: effectiveWorkspace,
-          cwd: effectiveCwd ?? effectiveWorkspace,
-          sandboxToolPolicy: sandbox?.tools,
-        },
-        warn: (message) => embeddedAgentLog.warn(message),
-      });
+    policyContext: {
+      config: params.config,
+      sessionKey: sandboxSessionKey,
+      runSessionKey:
+        params.sessionKey && params.sessionKey !== sandboxSessionKey
+          ? params.sessionKey
+          : undefined,
+      sessionId: params.sessionId,
+      runId: params.runId,
+      agentId: sessionAgentId,
+      agentDir: agentDir ?? resolveAgentDir(params.config ?? {}, sessionAgentId),
+      agentAccountId: params.agentAccountId,
+      scheduledToolPolicy: params.scheduledToolPolicy,
+      messageProvider: params.messageProvider ?? params.messageChannel,
+      messageChannel: params.messageChannel,
+      chatType: params.chatType,
+      messageTo: params.messageTo,
+      messageThreadId: params.messageThreadId,
+      currentChannelId: params.currentChannelId,
+      currentMessagingTarget: params.currentMessagingTarget,
+      currentThreadTs: params.currentThreadTs,
+      currentMessageId: params.currentMessageId,
+      groupId: params.groupId,
+      groupChannel: params.groupChannel,
+      groupSpace: params.groupSpace,
+      memberRoleIds: params.memberRoleIds,
+      spawnedBy: params.spawnedBy,
+      senderId: params.senderId,
+      senderName: params.senderName,
+      senderUsername: params.senderUsername,
+      senderE164: params.senderE164,
+      senderIsOwner: params.senderIsOwner,
+      modelProvider: params.provider,
+      modelId: params.modelId,
+      modelApi: params.model.api,
+      modelContextWindowTokens: params.model.contextWindow,
+      modelHasVision: params.model.input?.includes("image") ?? false,
+      workspaceDir: effectiveWorkspace,
+      cwd: effectiveCwd ?? effectiveWorkspace,
+      sandboxToolPolicy: sandbox?.tools,
+    },
+    warn: (message) => embeddedAgentLog.warn(message),
+  });
   try {
     // Restricted dynamic-tool profiles (private QA, exclusion lists) gate scoped
     // MCP tools exactly like every other dynamic tool. Filter both lists with the

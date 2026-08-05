@@ -13,6 +13,7 @@ import type {
   CodexBundleMcpThreadConfig,
   LoadCodexBundleMcpThreadConfigParams,
 } from "../agents/codex-mcp-config.types.js";
+import { shouldCreateBundleMcpRuntimeForAttempt } from "../agents/embedded-agent-runner/run/attempt-tool-construction-plan.js";
 import type {
   EmbeddedRunAttemptParams as CoreEmbeddedRunAttemptParams,
   EmbeddedRunAttemptResult,
@@ -421,6 +422,15 @@ export async function materializeConfiguredMcpToolsForHarnessRun(
     >
   >
 > {
+  if (
+    !shouldCreateBundleMcpRuntimeForAttempt({
+      toolsEnabled: params.toolsEnabled !== false,
+      disableTools: params.disableTools,
+      toolsAllow: params.toolsAllow,
+    })
+  ) {
+    return undefined;
+  }
   const { materializeConfiguredMcpToolsForHarnessRun: materialize } =
     await import("../agents/agent-bundle-mcp-harness.js");
   return materialize(params);

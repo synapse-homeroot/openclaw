@@ -1587,6 +1587,40 @@ describe("runCodexAppServerAttempt", () => {
     expect(dispose).toHaveBeenCalled();
   });
 
+  it("bridges configured MCP for an exact finite MCP-only cap", async () => {
+    const configuredTool = createRuntimeDynamicTool("project-tracker__list");
+    const dispose = vi.fn(async () => undefined);
+    agentHarnessRuntimeMocks.configuredMcpTools = {
+      tools: [configuredTool],
+      advertisedTools: [configuredTool],
+      appTools: [],
+      restrictAppTools: vi.fn(),
+      dispose,
+    };
+    const { sessionFile, workspaceDir } = createRunPaths();
+    const harness = createStartedThreadHarness();
+    const params = createParams(sessionFile, workspaceDir);
+    params.disableTools = false;
+    params.toolsAllow = ["project-tracker__list"];
+    setCodexTestModelSupportsTools(params, true);
+
+    const run = runCodexAppServerAttempt(params);
+    await harness.waitForMethod("thread/start");
+    const threadStart = harness.requests.find((request) => request.method === "thread/start");
+    const dynamicTools =
+      (threadStart?.params as { dynamicTools?: CodexDynamicToolSpec[] } | undefined)
+        ?.dynamicTools ?? [];
+    expect(flattenCodexDynamicToolFunctions(dynamicTools).map((tool) => tool.name)).toContain(
+      "project-tracker__list",
+    );
+    expect(agentHarnessRuntimeMocks.materializeConfiguredMcpCalls[0]).toMatchObject({
+      toolsAllow: ["project-tracker__list"],
+    });
+    await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+    await run;
+    expect(dispose).toHaveBeenCalled();
+  });
+
   it("disposes configured MCP when Codex startup fails before the turn becomes active", async () => {
     const configuredTool = createRuntimeDynamicTool("project-tracker__list");
     const dispose = vi.fn(async () => undefined);
@@ -1661,15 +1695,6 @@ describe("runCodexAppServerAttempt", () => {
       rawRun: true,
     },
   ])("does not materialize configured MCP when $name", async (testCase) => {
-    const configuredTool = createRuntimeDynamicTool("project-tracker__list");
-    const dispose = vi.fn(async () => undefined);
-    agentHarnessRuntimeMocks.configuredMcpTools = {
-      tools: [configuredTool],
-      advertisedTools: [configuredTool],
-      appTools: [],
-      restrictAppTools: vi.fn(),
-      dispose,
-    };
     agentHarnessRuntimeMocks.forceModelToolsUnsupported = testCase.modelToolsUnsupported;
     const { sessionFile, workspaceDir } = createRunPaths();
     const harness = createStartedThreadHarness();
@@ -1692,7 +1717,6 @@ describe("runCodexAppServerAttempt", () => {
     );
     await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
     await run;
-    expect(dispose).not.toHaveBeenCalled();
   });
 
   it("resumes unchanged configured MCP schemas with the current execution closure", async () => {

@@ -38,7 +38,7 @@ describe("assertSupportedTurn", () => {
     ).toEqual({ provider: "openai", model: "gpt-5.4" });
   });
 
-  it("rejects inherited native authority and reachable MCP with recovery guidance", () => {
+  it("rejects inherited native authority with executable recovery guidance", () => {
     const base = {
       sessionId: "session-1",
       sessionFile: "/tmp/session.jsonl",
@@ -62,7 +62,30 @@ describe("assertSupportedTurn", () => {
         ...base,
         scheduledNativePolicy: { version: 1, mode: "inherit" },
       }),
-    ).toThrow(/cannot currently preserve.*native tool authority.*sessions\.reclaim/is);
+    ).toThrow(
+      /inherited native tool authority.*reauthorize.*explicit finite tool cap.*automations edit.*--tools.*sessions\.reclaim.*"key":"<session-key>".*retry locally/is,
+    );
+  });
+
+  it("rejects reachable MCP with executable recovery guidance", () => {
+    const base = {
+      sessionId: "session-1",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp/workspace",
+      prompt: "run",
+      timeoutMs: 1_000,
+      runId: "run-1",
+      provider: "openai",
+      model: "gpt-5.4",
+      config: {
+        agents: {
+          defaults: {
+            models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } },
+          },
+        },
+      },
+    } as SessionPlacementTurnParams;
+
     expect(() =>
       assertSupportedTurn({
         ...base,
