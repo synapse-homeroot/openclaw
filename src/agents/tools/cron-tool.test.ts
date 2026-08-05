@@ -1796,6 +1796,56 @@ describe("cron tool", () => {
     expect(identities.at(-1)?.cronCreatorPolicy?.openClawToolsCap).toBe(testCase.expected);
   });
 
+  it.each(["add", "update"] as const)(
+    "signs disabled native provenance for non-Codex harness cron.%s",
+    async (action) => {
+      const identities: Array<ReturnType<typeof getGatewayToolCallerIdentity>> = [];
+      const tool = createCronTool(
+        {
+          agentSessionKey: "agent:main:copilot:direct:operator",
+          creatorToolAllowlist: ["read", "automations"],
+        },
+        {
+          callGatewayTool: async <T>(method: string) => {
+            identities.push(getGatewayToolCallerIdentity());
+            if (method === "cron.get") {
+              return {
+                id: "job-1",
+                configRevision: "sha256:test",
+                payload: { kind: "agentTurn", message: "before", toolsAllow: ["read"] },
+              } as T;
+            }
+            return { id: "job-1" } as T;
+          },
+        },
+      );
+
+      if (action === "add") {
+        await tool.execute("call-copilot-create", {
+          action,
+          job: {
+            name: "copilot default cap",
+            schedule: { kind: "every", everyMs: 60_000 },
+            sessionTarget: "isolated",
+            payload: { kind: "agentTurn", message: "hello" },
+          },
+        });
+      } else {
+        await tool.execute("call-copilot-update", {
+          action,
+          id: "job-1",
+          patch: { payload: { toolsAllow: null } },
+        });
+      }
+
+      expect(identities.at(-1)?.cronCreatorPolicy).toEqual({
+        version: 1,
+        codexNativeSurface: "disabled",
+        openClawToolsCap: "creator-default",
+      });
+    },
+  );
+
   it("preserves explicit job.sessionKey on add", async () => {
     callGatewayMock.mockResolvedValueOnce({ ok: true });
 
