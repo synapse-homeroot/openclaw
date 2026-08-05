@@ -26,7 +26,7 @@ export type AuditEventWriter = {
   record: (input: AuditEventInput) => boolean;
   /** Reports only queue acceptance; persistence succeeds or fails asynchronously. */
   recordExecutionIdentity: (work: ExecutionIdentityAdmissionWork) => boolean;
-  stop: () => Promise<void>;
+  stop: (finalInputs?: readonly AuditEventInput[]) => Promise<void>;
 };
 
 function formatAuditWriterError(error: unknown): string {
@@ -141,6 +141,11 @@ export function createAuditEventWriter(
       return false;
     }
   };
+  const postFinalRecord = (input: AuditEventInput) => {
+    // Node Worker.postMessage is not the browser Window API and has no targetOrigin.
+    // oxlint-disable-next-line unicorn/require-post-message-target-origin
+    worker.postMessage({ type: "record-event", input });
+  };
 
   worker.on("message", (message: AuditWriterMessage) => {
     switch (message.type) {
@@ -182,13 +187,26 @@ export function createAuditEventWriter(
     ready,
     record: (input) => enqueue({ type: "record-event", input }),
     recordExecutionIdentity: (work) => enqueue({ type: "record-execution-identity", work }),
-    stop: async () => {
+    stop: async (finalInputs = []) => {
       if (stopped) {
         return;
       }
       stopped = true;
       if (unavailable) {
         return;
+      }
+      for (const input of finalInputs) {
+        pending += 1;
+        try {
+          // Shutdown records bypass the live queue cap but retain worker message
+          // ordering, so the following stop drains them before exit.
+          postFinalRecord(input);
+        } catch (error) {
+          pending -= 1;
+          unavailable = true;
+          fail(error);
+          return;
+        }
       }
       await new Promise<void>((resolve) => {
         resolveStop = resolve;

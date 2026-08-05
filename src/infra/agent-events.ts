@@ -1,9 +1,13 @@
 // Stores and broadcasts agent lifecycle and streaming events.
-import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { notifyListeners, registerListener } from "../shared/listeners.js";
 import { hasInvalidLifecycleStartTimestamp } from "./agent-event-lifecycle.js";
 import { createAgentRunStaleLifecycleError } from "./agent-lifecycle-error.js";
+import {
+  getAgentRunExecutionLifecycleGeneration,
+  runOncePerAgentRun,
+  withAgentRunLifecycleGeneration,
+} from "./agent-run-execution-context.js";
 import {
   getAgentRunContext,
   getAgentRunContextOwnership,
@@ -88,12 +92,6 @@ type AgentEventState = {
 };
 
 const AGENT_EVENT_STATE_KEY = Symbol.for("openclaw.agentEvents.state");
-const AGENT_EVENT_EXECUTION_CONTEXT_KEY = Symbol.for("openclaw.agentEvents.executionContext");
-
-type AgentEventExecutionContext = {
-  lifecycleGeneration: string;
-  onceByRun: Map<string, Promise<unknown>>;
-};
 
 function getAgentEventState(): AgentEventState {
   return resolveGlobalSingleton<AgentEventState>(AGENT_EVENT_STATE_KEY, () => ({
@@ -107,37 +105,7 @@ registerAgentRunSequenceResetHandler((runId) => {
   getAgentEventState().seqByRun.delete(runId);
 });
 
-function getAgentEventExecutionContext() {
-  return resolveGlobalSingleton<AsyncLocalStorage<AgentEventExecutionContext>>(
-    AGENT_EVENT_EXECUTION_CONTEXT_KEY,
-    () => new AsyncLocalStorage<AgentEventExecutionContext>(),
-  );
-}
-
-/** Runs one execution with immutable ownership inherited by every emitted stream event. */
-export function withAgentRunLifecycleGeneration<T>(lifecycleGeneration: string, run: () => T): T {
-  const storage = getAgentEventExecutionContext();
-  const parent = storage.getStore();
-  const onceByRun =
-    parent?.lifecycleGeneration === lifecycleGeneration ? parent.onceByRun : new Map();
-  return storage.run({ lifecycleGeneration, onceByRun }, run);
-}
-
-/** Shares one operation across fallback attempts that belong to the same admitted run. */
-export function runOncePerAgentRun<T>(runId: string, operation: string, run: () => Promise<T>) {
-  const context = getAgentEventExecutionContext().getStore();
-  if (!context) {
-    return run();
-  }
-  const key = `${operation}:${runId}`;
-  const existing = context.onceByRun.get(key);
-  if (existing) {
-    return existing as Promise<T>;
-  }
-  const pending = Promise.resolve().then(run);
-  context.onceByRun.set(key, pending);
-  return pending;
-}
+export { runOncePerAgentRun, withAgentRunLifecycleGeneration };
 
 export function getAgentEventLifecycleGeneration(): string {
   return getAgentRunLifecycleGeneration();
@@ -170,7 +138,7 @@ export function assertAgentRunLifecycleGenerationCurrent(lifecycleGeneration: st
 /** Captures immutable lifecycle ownership for one admitted execution. */
 export function captureAgentRunLifecycleGeneration(runId: string): string {
   return (
-    getAgentEventExecutionContext().getStore()?.lifecycleGeneration ??
+    getAgentRunExecutionLifecycleGeneration() ??
     getAgentRunContext(runId)?.lifecycleGeneration ??
     getAgentRunLifecycleGeneration()
   );
@@ -217,7 +185,7 @@ function enrichAgentEvent(
   }
   const context = getAgentRunContext(event.runId);
   const executionLifecycleGeneration =
-    event.lifecycleGeneration ?? getAgentEventExecutionContext().getStore()?.lifecycleGeneration;
+    event.lifecycleGeneration ?? getAgentRunExecutionLifecycleGeneration();
   const ownedLifecycleGeneration = executionLifecycleGeneration ?? context?.lifecycleGeneration;
   if (
     executionLifecycleGeneration &&
@@ -315,6 +283,55 @@ function enrichAgentEvent(
   return enriched;
 }
 
+function enrichOwnedStaleAgentAuditEvent(
+  event: Omit<AgentEventPayload, "seq" | "ts">,
+): AgentEventPayload | undefined {
+  if (
+    event.stream !== "lifecycle" ||
+    (event.data.phase !== "start" && event.data.phase !== "end" && event.data.phase !== "error")
+  ) {
+    return undefined;
+  }
+  const state = getAgentEventState();
+  const inheritedLifecycleGeneration = getAgentRunExecutionLifecycleGeneration();
+  const lifecycleGeneration = event.lifecycleGeneration ?? inheritedLifecycleGeneration;
+  const currentLifecycleGeneration = getAgentRunLifecycleGeneration();
+  if (!lifecycleGeneration || lifecycleGeneration === currentLifecycleGeneration) {
+    return undefined;
+  }
+  const context = getAgentRunContext(event.runId);
+  if (
+    (context && context.lifecycleGeneration !== lifecycleGeneration) ||
+    (!context && inheritedLifecycleGeneration !== lifecycleGeneration) ||
+    hasInvalidLifecycleStartTimestamp(event.stream, event.data)
+  ) {
+    return undefined;
+  }
+  const nextSeq = (state.seqByRun.get(event.runId) ?? 0) + 1;
+  state.seqByRun.set(event.runId, nextSeq);
+  const sessionKey =
+    (typeof event.sessionKey === "string" && event.sessionKey.trim()
+      ? event.sessionKey
+      : undefined) ?? context?.sessionKey;
+  const sessionId = event.sessionId ?? context?.sessionId;
+  const agentId = event.agentId ?? context?.agentId;
+  const enriched: AgentEventPayload = {
+    ...event,
+    ...(sessionKey ? { sessionKey } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(agentId ? { agentId } : {}),
+    seq: nextSeq,
+    ts: Date.now(),
+  };
+  // This route is audit-only: a still-owned pre-rotation execution may finish
+  // its durable ordering, but stale lifecycle never reaches public listeners.
+  Object.defineProperty(enriched, "lifecycleGeneration", {
+    value: lifecycleGeneration,
+    enumerable: false,
+  });
+  return enriched;
+}
+
 /** Emits an event only when its run ownership is still current. */
 export function emitAgentEventIfCurrent(event: Omit<AgentEventPayload, "seq" | "ts">): boolean {
   const enriched = enrichAgentEvent(event);
@@ -343,9 +360,26 @@ export function emitAgentEventForOwner(
 /** Emits run metadata only to the Gateway-owned durable audit projection. */
 export function emitAgentAuditEvent(event: Omit<AgentEventPayload, "seq" | "ts">) {
   const state = getAgentEventState();
-  const enriched = enrichAgentEvent(event);
+  const enriched = enrichAgentEvent(event) ?? enrichOwnedStaleAgentAuditEvent(event);
   if (enriched) {
-    notifyListeners(state.auditListeners, enriched);
+    const attribution = getAgentRunContext(event.runId)?.attribution;
+    const matchingAttribution =
+      attribution?.lifecycleGeneration === enriched.lifecycleGeneration ? attribution : undefined;
+    const auditEvent = matchingAttribution
+      ? {
+          ...enriched,
+          sessionKey: matchingAttribution.sessionKey,
+          sessionId: matchingAttribution.sessionId,
+          agentId: matchingAttribution.agentId,
+        }
+      : enriched;
+    if (enriched.lifecycleGeneration) {
+      Object.defineProperty(auditEvent, "lifecycleGeneration", {
+        value: enriched.lifecycleGeneration,
+        enumerable: false,
+      });
+    }
+    notifyListeners(state.auditListeners, auditEvent);
     const phase = event.stream === "lifecycle" ? event.data.phase : undefined;
     if ((phase === "end" || phase === "error") && !getAgentRunContext(event.runId)) {
       // Private synthetic runs bypass public terminal cleanup. Release sequence state only

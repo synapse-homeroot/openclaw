@@ -1,121 +1,60 @@
 /** Redaction-safe projection from live agent events into durable audit metadata. */
-import { createHash } from "node:crypto";
 import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import {
   AGENT_RUN_TERMINAL_RETRY_GRACE_MS,
   buildAgentRunTerminalOutcomeFromLifecycleEvent,
   classifyAgentRunTerminalOutcome,
-  mergeAgentRunTerminalOutcome,
   type AgentRunTerminalOutcome,
 } from "../agents/agent-run-terminal-outcome.js";
-import { isAllowedToolCallName } from "../agents/tool-call-shared.js";
-import type { AgentEventPayload } from "../infra/agent-events.js";
+import {
+  isAgentEventLifecycleGenerationCurrent,
+  type AgentEventPayload,
+} from "../infra/agent-events.js";
+import { onAgentRunContextRetired } from "../infra/agent-run-context-retirement.js";
+import { getAgentRunContext } from "../infra/agent-run-registry.js";
 import type { TrustedToolExecutionEvent } from "../infra/diagnostic-events.js";
-import { pruneMapToMaxSize } from "../infra/map-size.js";
+import { getTrustedToolExecutionLifecycleGeneration } from "../infra/trusted-tool-execution-context.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
-import { parseAgentSessionKey } from "../routing/session-key.js";
+import {
+  buildRunInstance,
+  createAgentAuditProjectionState,
+  deriveProvenance,
+  forgetAuthoritativeOpenRun,
+  forgetOpenRun,
+  getAuthoritativeRunContextToken,
+  hasAuthoritativeRunContext,
+  MAX_TRACKED_RUN_PROVENANCE,
+  nonEmptyString,
+  rememberRunStart,
+  rememberRunTerminal,
+  retainAuthoritativeOpenRunForRetirement,
+  resolveProvenance,
+  resolveToolProvenance,
+  type AgentAuditProjectionState,
+} from "./agent-event-audit-provenance.js";
+import { auditSourceIdentity } from "./agent-event-audit-source.js";
+import {
+  agentAuditAttemptKey,
+  selectAgentAuditTerminalCandidate,
+  settledAgentAuditAttemptFloor,
+  type AgentAuditPendingTerminal,
+  type AgentAuditProjection,
+  type AgentAuditSettledRun,
+  type AgentAuditTerminalCandidate,
+} from "./agent-event-audit-terminal.js";
+import { auditToolCallId, auditToolName } from "./agent-event-audit-tool-identity.js";
+import type { AgentEventAuditRecorder } from "./agent-event-audit-types.js";
 import type {
-  AuditEventInput,
   AgentRunFinishedAuditTerminal,
   ToolActionAuditEventInput,
 } from "./audit-event-types.js";
 import { createAuditEventWriter, type AuditEventWriter } from "./audit-event-writer.js";
 
-const runProvenance = new Map<
-  string,
-  { actorType: "agent" | "system"; agentId: string; sessionKey?: string; sessionId?: string }
->();
-const MAX_TRACKED_RUN_PROVENANCE = 1_024;
 const log = createSubsystemLogger("audit/events");
 let persistenceFailureWarned = false;
 
-export type AgentEventAuditRecorder = {
-  record: (event: AgentEventPayload) => void;
-  recordTool: (event: TrustedToolExecutionEvent) => void;
-  stop: () => Promise<void>;
-};
-
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function auditToolName(value: unknown): string | undefined {
-  const toolName = nonEmptyString(value)?.trim();
-  if (!toolName) {
-    return undefined;
-  }
-  // Tool lifecycle producers include provider-controlled streams. Preserve
-  // only the compact model-facing name contract at the durable boundary.
-  return isAllowedToolCallName(toolName, null) ? toolName : "unknown";
-}
-
-function auditToolCallId(value: unknown): string | undefined {
-  const toolCallId = nonEmptyString(value);
-  if (!toolCallId) {
-    return undefined;
-  }
-  // Call ids remain useful for correlation, but their provider-owned bytes
-  // are not operator metadata and must never enter the ledger verbatim.
-  return `sha256:${createHash("sha256").update(toolCallId).digest("hex")}`;
-}
-
-function legacyAuditSourceId(params: {
-  runId: string;
-  sourceSequence: number;
-  occurredAt: number;
-  action: string;
-}): string {
-  // Preserve the original store-owned identity byte-for-byte so replayed
-  // run/tool events still deduplicate after the versioned contract refactor.
-  return `${params.runId}:${params.sourceSequence}:${params.occurredAt}:${params.action}`;
-}
-
-function rememberRunProvenance(
-  runId: string,
-  provenance: {
-    actorType: "agent" | "system";
-    agentId: string;
-    sessionKey?: string;
-    sessionId?: string;
-  },
-): void {
-  runProvenance.delete(runId);
-  runProvenance.set(runId, provenance);
-  pruneMapToMaxSize(runProvenance, MAX_TRACKED_RUN_PROVENANCE);
-}
-
-function resolveProvenance(
-  runId: string,
-  event: { agentId?: unknown; sessionKey?: unknown; sessionId?: unknown },
-) {
-  const remembered = runProvenance.get(runId);
-  const sessionKey = nonEmptyString(event.sessionKey) ?? remembered?.sessionKey;
-  const sessionId = nonEmptyString(event.sessionId) ?? remembered?.sessionId;
-  const eventAgentId = nonEmptyString(event.agentId);
-  const sessionAgentId = sessionKey ? parseAgentSessionKey(sessionKey)?.agentId : undefined;
-  const agentId = eventAgentId ?? sessionAgentId ?? remembered?.agentId ?? "unknown";
-  const actorType = eventAgentId || sessionAgentId ? "agent" : (remembered?.actorType ?? "system");
-  return { actorType, agentId, sessionKey, sessionId };
-}
-
-function resolveToolProvenance(
-  runId: string,
-  event: { agentId?: unknown; sessionKey?: unknown; sessionId?: unknown },
-) {
-  const observed = resolveProvenance(runId, event);
-  const remembered = runProvenance.get(runId);
-  if (!remembered) {
-    return observed;
-  }
-  // Tool diagnostics may use an execution sandbox key. Lifecycle start owns
-  // the canonical run identity; tool metadata only fills missing session fields.
-  return {
-    ...remembered,
-    sessionKey: remembered.sessionKey ?? observed.sessionKey,
-    sessionId: remembered.sessionId ?? observed.sessionId,
-  };
-}
+export type { AgentEventAuditRecorder } from "./agent-event-audit-types.js";
 
 const AUDIT_TERMINAL_BY_CLASSIFICATION = {
   success: { status: "succeeded" as const },
@@ -138,29 +77,57 @@ function classifyRunTerminal(
   return { outcome, ...terminal };
 }
 
-type AgentAuditProjection = {
-  input: AuditEventInput;
-  terminal?: { outcome: AgentRunTerminalOutcome; phase: "end" | "error" };
-};
-
-function projectAgentEvent(event: AgentEventPayload): AgentAuditProjection | undefined {
+function projectAgentEvent(
+  state: AgentAuditProjectionState,
+  event: AgentEventPayload,
+): AgentAuditProjection | undefined {
   const runId = nonEmptyString(event.runId);
   const phase = nonEmptyString(event.data.phase);
   if (!runId || !phase) {
     return undefined;
   }
-  const provenance = resolveProvenance(runId, event);
+  const runInstance = buildRunInstance(runId, event.lifecycleGeneration);
+  const isLifecycleTerminal =
+    event.stream === "lifecycle" && (phase === "end" || phase === "error");
+  const authoritativeToken = getAuthoritativeRunContextToken(runInstance, runId);
+  const isTrackedStaleRetry =
+    event.stream === "lifecycle" &&
+    phase === "start" &&
+    authoritativeToken !== undefined &&
+    state.authoritativeOpenProvenance.has(authoritativeToken);
+  const isAuthoritativeLifecycleTerminal =
+    isLifecycleTerminal &&
+    (state.openRunProvenance.has(runInstance) || hasAuthoritativeRunContext(runInstance, runId));
+  if (
+    event.lifecycleGeneration &&
+    !isAgentEventLifecycleGenerationCurrent(event.lifecycleGeneration) &&
+    !isAuthoritativeLifecycleTerminal &&
+    !isTrackedStaleRetry
+  ) {
+    // Only the exact still-owned pre-rotation instance may retry or close,
+    // including after bounded provenance tracking evicts its local entry.
+    return undefined;
+  }
   if (event.stream === "lifecycle" && phase === "start") {
-    rememberRunProvenance(runId, provenance);
+    // Retry starts may reopen a completed instance. rememberRunStart reuses its
+    // admitted provenance so replayed identity fields cannot replace authority.
+    const provenance = rememberRunStart(
+      state,
+      runInstance,
+      runId,
+      deriveProvenance(event),
+      event.lifecycleGeneration !== undefined,
+    );
     const occurredAt = asDateTimestampMs(event.data.startedAt) ?? event.ts;
     const action = "agent.run.started" as const;
     return {
       input: {
-        sourceId: legacyAuditSourceId({
+        ...auditSourceIdentity({
           runId,
           sourceSequence: event.seq,
           occurredAt,
           action,
+          lifecycleGeneration: event.lifecycleGeneration,
         }),
         sourceSequence: event.seq,
         occurredAt,
@@ -176,18 +143,33 @@ function projectAgentEvent(event: AgentEventPayload): AgentAuditProjection | und
       },
     };
   }
-  if (event.stream === "lifecycle" && (phase === "end" || phase === "error")) {
-    rememberRunProvenance(runId, provenance);
+  if (isLifecycleTerminal) {
+    const activeRunInstance = state.activeRunInstanceByRunId.get(runId);
+    const registeredLifecycleGeneration = getAgentRunContext(runId)?.lifecycleGeneration;
+    if (
+      !event.lifecycleGeneration &&
+      !state.openRunProvenance.has(runInstance) &&
+      (registeredLifecycleGeneration !== undefined ||
+        (activeRunInstance && activeRunInstance !== runInstance))
+    ) {
+      // Gateway lifecycle emitters always stamp a generation. A legacy
+      // terminal cannot be safely attached to a generated admission, so reject
+      // it unless a generation-less start established its own run instance.
+      return undefined;
+    }
+    const provenance = resolveProvenance(state, runInstance, event);
+    rememberRunTerminal(state, runInstance, runId, provenance);
     const { outcome, ...terminal } = classifyRunTerminal(event.data, phase);
     const occurredAt = asDateTimestampMs(event.data.endedAt) ?? event.ts;
     const action = "agent.run.finished" as const;
     return {
       input: {
-        sourceId: legacyAuditSourceId({
+        ...auditSourceIdentity({
           runId,
           sourceSequence: event.seq,
           occurredAt,
           action,
+          lifecycleGeneration: event.lifecycleGeneration,
         }),
         sourceSequence: event.seq,
         occurredAt,
@@ -209,6 +191,7 @@ function projectAgentEvent(event: AgentEventPayload): AgentAuditProjection | und
 
 /** Project the complete trusted tool-execution lifecycle without private diagnostic content. */
 function projectToolExecutionEventToAudit(
+  state: AgentAuditProjectionState,
   event: TrustedToolExecutionEvent,
 ): ToolActionAuditEventInput | undefined {
   // Schema quarantine describes tool availability before invocation. Without
@@ -226,7 +209,13 @@ function projectToolExecutionEventToAudit(
     return undefined;
   }
   const toolCallId = auditToolCallId(event.toolCallId);
-  const provenance = resolveToolProvenance(runId, event);
+  const capturedLifecycleGeneration = getTrustedToolExecutionLifecycleGeneration(event);
+  const { provenance, lifecycleGeneration } = resolveToolProvenance(
+    state,
+    runId,
+    event,
+    capturedLifecycleGeneration,
+  );
   const occurredAt = asDateTimestampMs(event.sourceTimestampMs) ?? event.ts;
   const attribution = {
     sourceSequence: event.seq,
@@ -244,11 +233,12 @@ function projectToolExecutionEventToAudit(
   if (event.type === "tool.execution.started") {
     const action = "tool.action.started" as const;
     return {
-      sourceId: legacyAuditSourceId({
+      ...auditSourceIdentity({
         runId,
         sourceSequence: event.seq,
         occurredAt,
         action,
+        lifecycleGeneration,
       }),
       ...attribution,
       action,
@@ -290,11 +280,12 @@ function projectToolExecutionEventToAudit(
               : { status: "failed" as const, errorCode: "tool_failed" as const };
   const action = "tool.action.finished" as const;
   return {
-    sourceId: legacyAuditSourceId({
+    ...auditSourceIdentity({
       runId,
       sourceSequence: event.seq,
       occurredAt,
       action,
+      lifecycleGeneration,
     }),
     ...attribution,
     action,
@@ -308,6 +299,7 @@ export function createAgentEventAuditRecorder(options?: {
   stateDir?: string;
   terminalSettleMs?: number;
 }): AgentEventAuditRecorder {
+  const projectionState = createAgentAuditProjectionState();
   const writer =
     options?.writer ??
     createAuditEventWriter({
@@ -319,23 +311,65 @@ export function createAgentEventAuditRecorder(options?: {
         }
       },
     });
-  type PendingTerminal = NonNullable<AgentAuditProjection["terminal"]> & {
-    input: AuditEventInput;
-    timer: ReturnType<typeof setTimeout>;
-  };
   const terminalSettleMs = Math.max(
     0,
     Math.floor(options?.terminalSettleMs ?? AGENT_RUN_TERMINAL_RETRY_GRACE_MS),
   );
-  const pendingTerminals = new Map<string, PendingTerminal>();
+  const pendingTerminals = new Map<string, AgentAuditPendingTerminal>();
+  const rejectedTerminalsByAttempt = new Map<
+    string,
+    AgentAuditTerminalCandidate & { runInstance: string }
+  >();
+  const rejectedCountByRunInstance = new Map<string, number>();
   const openRunInstances = new Set<string>();
-  const settledRunInstances = new Set<string>();
-
-  const rememberSettled = (runInstance: string) => {
+  const openAuthoritativeRunContexts = new WeakMap<
+    object,
+    { attemptEpoch: number; open: boolean; startSequence: number }
+  >();
+  const retiredOpenRunInstances = new Set<string>();
+  const unownedOpenRunInstances = new Set<string>();
+  const settledRunInstances = new Map<string, AgentAuditSettledRun>();
+  const attemptEpochByRunInstance = new Map<string, number>();
+  const attemptStartSequenceByRunInstance = new Map<string, number>();
+  const forgetRejectedAttempt = (attemptKey: string) => {
+    const rejected = rejectedTerminalsByAttempt.get(attemptKey);
+    if (!rejected) {
+      return;
+    }
+    rejectedTerminalsByAttempt.delete(attemptKey);
+    const rejectedCount = (rejectedCountByRunInstance.get(rejected.runInstance) ?? 1) - 1;
+    if (rejectedCount > 0) {
+      rejectedCountByRunInstance.set(rejected.runInstance, rejectedCount);
+    } else {
+      rejectedCountByRunInstance.delete(rejected.runInstance);
+      if (!openRunInstances.has(rejected.runInstance)) {
+        attemptEpochByRunInstance.delete(rejected.runInstance);
+      }
+    }
+  };
+  const rememberRejectedTerminal = (runInstance: string, incoming: AgentAuditTerminalCandidate) => {
+    const existing = rejectedTerminalsByAttempt.get(incoming.attemptKey);
+    const selected = existing ? selectAgentAuditTerminalCandidate(existing, incoming) : incoming;
+    if (!existing) {
+      rejectedCountByRunInstance.set(
+        runInstance,
+        (rejectedCountByRunInstance.get(runInstance) ?? 0) + 1,
+      );
+    }
+    rejectedTerminalsByAttempt.delete(incoming.attemptKey);
+    rejectedTerminalsByAttempt.set(incoming.attemptKey, { ...selected, runInstance });
+    if (rejectedTerminalsByAttempt.size > MAX_TRACKED_RUN_PROVENANCE) {
+      const oldest = rejectedTerminalsByAttempt.keys().next().value;
+      if (oldest !== undefined) {
+        forgetRejectedAttempt(oldest);
+      }
+    }
+  };
+  const rememberSettled = (runInstance: string, observedThroughSequence: number) => {
     settledRunInstances.delete(runInstance);
-    settledRunInstances.add(runInstance);
+    settledRunInstances.set(runInstance, { terminalSequence: observedThroughSequence });
     if (settledRunInstances.size > MAX_TRACKED_RUN_PROVENANCE) {
-      const oldest = settledRunInstances.values().next().value;
+      const oldest = settledRunInstances.keys().next().value;
       if (oldest !== undefined) {
         settledRunInstances.delete(oldest);
       }
@@ -356,26 +390,39 @@ export function createAgentEventAuditRecorder(options?: {
     }
     clearPending(runInstance);
     openRunInstances.delete(runInstance);
-    if (writer.record(pending.input)) {
-      rememberSettled(runInstance);
+    const runId = nonEmptyString(pending.input.runId);
+    const authoritativeContext = runId
+      ? getAuthoritativeRunContextToken(runInstance, runId)
+      : undefined;
+    if (authoritativeContext && runId) {
+      const attempt = openAuthoritativeRunContexts.get(authoritativeContext);
+      if (attempt) {
+        openAuthoritativeRunContexts.set(authoritativeContext, { ...attempt, open: false });
+      }
+      forgetAuthoritativeOpenRun(projectionState, runInstance, runId);
+    }
+    const rejected = rejectedTerminalsByAttempt.get(pending.attemptKey);
+    const selected = rejected ? selectAgentAuditTerminalCandidate(rejected, pending) : pending;
+    if (writer.record(selected.input)) {
+      forgetRejectedAttempt(selected.attemptKey);
+      if (runId) {
+        forgetOpenRun(projectionState, runInstance, runId);
+      }
+      retiredOpenRunInstances.delete(runInstance);
+      unownedOpenRunInstances.delete(runInstance);
+      attemptStartSequenceByRunInstance.delete(runInstance);
+      rememberSettled(runInstance, selected.observedThroughSequence);
+      if (!rejectedCountByRunInstance.has(runInstance)) {
+        attemptEpochByRunInstance.delete(runInstance);
+      }
+    } else {
+      rememberRejectedTerminal(runInstance, selected);
     }
   };
-  const scheduleTerminal = (runInstance: string, incoming: Omit<PendingTerminal, "timer">) => {
+  const scheduleTerminal = (runInstance: string, incoming: AgentAuditTerminalCandidate) => {
     const existing = pendingTerminals.get(runInstance);
-    let selected = incoming;
+    const selected = existing ? selectAgentAuditTerminalCandidate(existing, incoming) : incoming;
     if (existing) {
-      // A bare cleanup end can follow a definitive error without a retry start.
-      // Otherwise use the shared sticky timeout/cancellation merge contract.
-      const cleanupAfterError =
-        existing.phase === "error" &&
-        incoming.phase === "end" &&
-        incoming.outcome.reason === "completed";
-      if (cleanupAfterError) {
-        selected = existing;
-      } else {
-        const merged = mergeAgentRunTerminalOutcome(existing.outcome, incoming.outcome);
-        selected = merged === existing.outcome ? existing : incoming;
-      }
       clearTimeout(existing.timer);
     }
     const timer = setTimeout(() => flushPending(runInstance), terminalSettleMs);
@@ -389,44 +436,259 @@ export function createAgentEventAuditRecorder(options?: {
       }
     }
   };
-
+  const unsubscribeRunContextRetirement = onAgentRunContextRetired(
+    ({ runId, lifecycleGeneration, contextLifecycleToken }) => {
+      const runInstance = buildRunInstance(runId, lifecycleGeneration);
+      const authoritativeContext =
+        contextLifecycleToken ?? getAuthoritativeRunContextToken(runInstance, runId);
+      const authoritativeAttempt = authoritativeContext
+        ? openAuthoritativeRunContexts.get(authoritativeContext)
+        : undefined;
+      const authoritativeOpenAttempt = authoritativeAttempt?.open
+        ? authoritativeAttempt
+        : undefined;
+      if (
+        authoritativeAttempt &&
+        (pendingTerminals.has(runInstance) || rejectedCountByRunInstance.has(runInstance))
+      ) {
+        attemptEpochByRunInstance.set(runInstance, authoritativeAttempt.attemptEpoch);
+      }
+      const retainedAuthoritativeRun = retainAuthoritativeOpenRunForRetirement(
+        projectionState,
+        runInstance,
+        runId,
+        authoritativeContext,
+      );
+      if (retainedAuthoritativeRun || projectionState.openRunProvenance.has(runInstance)) {
+        // Context retirement can precede the final lifecycle event for every
+        // registry removal path. Keep only open attempts in the bounded
+        // retired set so delayed terminals retain their admitted provenance.
+        if (authoritativeOpenAttempt) {
+          attemptEpochByRunInstance.set(runInstance, authoritativeOpenAttempt.attemptEpoch);
+          attemptStartSequenceByRunInstance.set(
+            runInstance,
+            authoritativeOpenAttempt.startSequence,
+          );
+          openRunInstances.add(runInstance);
+        }
+        retiredOpenRunInstances.delete(runInstance);
+        retiredOpenRunInstances.add(runInstance);
+        unownedOpenRunInstances.delete(runInstance);
+        if (retiredOpenRunInstances.size > MAX_TRACKED_RUN_PROVENANCE) {
+          const oldest = retiredOpenRunInstances.values().next().value;
+          if (oldest !== undefined) {
+            const separator = oldest.indexOf("\0");
+            const retiredRunId = separator >= 0 ? oldest.slice(separator + 1) : oldest;
+            retiredOpenRunInstances.delete(oldest);
+            forgetOpenRun(projectionState, oldest, retiredRunId);
+            openRunInstances.delete(oldest);
+            attemptStartSequenceByRunInstance.delete(oldest);
+            if (!pendingTerminals.has(oldest) && !rejectedCountByRunInstance.has(oldest)) {
+              attemptEpochByRunInstance.delete(oldest);
+            }
+          }
+        }
+        return;
+      }
+      forgetOpenRun(projectionState, runInstance, runId);
+      openRunInstances.delete(runInstance);
+      retiredOpenRunInstances.delete(runInstance);
+      unownedOpenRunInstances.delete(runInstance);
+      attemptStartSequenceByRunInstance.delete(runInstance);
+      if (!pendingTerminals.has(runInstance) && !rejectedCountByRunInstance.has(runInstance)) {
+        attemptEpochByRunInstance.delete(runInstance);
+      }
+    },
+  );
   return {
     record: (event) => {
-      const projection = projectAgentEvent(event);
+      const runInstance = buildRunInstance(event.runId, event.lifecycleGeneration);
+      const phase = nonEmptyString(event.data.phase);
+      const settled = settledRunInstances.get(runInstance);
+      const authoritativeContext = getAuthoritativeRunContextToken(runInstance, event.runId);
+      const authoritativeAttempt = authoritativeContext
+        ? openAuthoritativeRunContexts.get(authoritativeContext)
+        : undefined;
+      const authoritativeOpenAttempt = authoritativeAttempt?.open
+        ? authoritativeAttempt
+        : undefined;
+      if (event.stream === "lifecycle") {
+        if (phase === "start") {
+          if (settled && event.seq <= settled.terminalSequence) {
+            return;
+          }
+          const attemptEpoch =
+            authoritativeAttempt?.attemptEpoch ?? attemptEpochByRunInstance.get(runInstance) ?? 0;
+          const rejectedAttempt = rejectedTerminalsByAttempt.get(
+            agentAuditAttemptKey(runInstance, attemptEpoch),
+          );
+          if (rejectedAttempt && event.seq <= rejectedAttempt.observedThroughSequence) {
+            return;
+          }
+          const pendingTerminal = pendingTerminals.get(runInstance);
+          if (pendingTerminal && event.seq <= pendingTerminal.observedThroughSequence) {
+            return;
+          }
+          const cancelsPendingTerminal = pendingTerminal !== undefined;
+          const hasOpenAttempt =
+            openRunInstances.has(runInstance) || authoritativeOpenAttempt !== undefined;
+          const canReplacePendingWithoutOpen =
+            event.lifecycleGeneration === undefined ||
+            isAgentEventLifecycleGenerationCurrent(event.lifecycleGeneration) ||
+            authoritativeContext !== undefined;
+          if (cancelsPendingTerminal && !hasOpenAttempt && !canReplacePendingWithoutOpen) {
+            return;
+          }
+          if (
+            !hasOpenAttempt &&
+            !authoritativeContext &&
+            !unownedOpenRunInstances.has(runInstance) &&
+            unownedOpenRunInstances.size >= MAX_TRACKED_RUN_PROVENANCE
+          ) {
+            return;
+          }
+          if (hasOpenAttempt) {
+            if (cancelsPendingTerminal) {
+              clearPending(runInstance);
+            }
+            const startSequence = Math.max(
+              event.seq,
+              authoritativeOpenAttempt?.startSequence ??
+                attemptStartSequenceByRunInstance.get(runInstance) ??
+                event.seq,
+            );
+            if (authoritativeContext) {
+              openAuthoritativeRunContexts.set(authoritativeContext, {
+                attemptEpoch:
+                  authoritativeOpenAttempt?.attemptEpoch ??
+                  attemptEpochByRunInstance.get(runInstance) ??
+                  1,
+                open: true,
+                startSequence,
+              });
+            } else {
+              openRunInstances.add(runInstance);
+              attemptStartSequenceByRunInstance.set(runInstance, startSequence);
+            }
+            return;
+          }
+          if (cancelsPendingTerminal) {
+            clearPending(runInstance);
+          }
+        } else if (phase === "end" || phase === "error") {
+          const attemptStartSequence =
+            authoritativeOpenAttempt?.startSequence ??
+            attemptStartSequenceByRunInstance.get(runInstance);
+          const settledAttemptFloor = settledAgentAuditAttemptFloor(settled);
+          if (
+            (attemptStartSequence !== undefined && event.seq <= attemptStartSequence) ||
+            (settledAttemptFloor !== undefined && event.seq <= settledAttemptFloor)
+          ) {
+            return;
+          }
+        }
+      }
+      const projection = projectAgentEvent(projectionState, event);
       if (!projection) {
         return;
       }
-      const runInstance = `${event.lifecycleGeneration ?? "unknown"}\0${event.runId}`;
       if (!projection.terminal) {
-        const alreadyOpen = openRunInstances.has(runInstance);
-        clearPending(runInstance);
-        settledRunInstances.delete(runInstance);
-        if (alreadyOpen) {
-          return;
-        }
         // Retry starts cancel a provisional terminal for the same logical run.
-        // Keep the original start so one run cannot acquire unmatched starts.
-        openRunInstances.add(runInstance);
+        // A writer-rejected terminal already crossed the settle boundary and
+        // remains a prior attempt; queue pressure must not rewrite that history.
+        if (authoritativeContext) {
+          // Registry-owned weak identity carries authoritative live attempt
+          // state without retaining completed run contexts.
+          openAuthoritativeRunContexts.set(authoritativeContext, {
+            attemptEpoch: (authoritativeAttempt?.attemptEpoch ?? 0) + 1,
+            open: true,
+            startSequence: event.seq,
+          });
+        } else {
+          attemptEpochByRunInstance.set(
+            runInstance,
+            (attemptEpochByRunInstance.get(runInstance) ?? 0) + 1,
+          );
+          openRunInstances.add(runInstance);
+          attemptStartSequenceByRunInstance.set(runInstance, event.seq);
+        }
+        if (settled) {
+          settledRunInstances.delete(runInstance);
+          settledRunInstances.set(runInstance, {
+            ...settled,
+            reopenedStartSequence: event.seq,
+          });
+        }
         writer.record(projection.input);
-        return;
-      }
-      if (settledRunInstances.has(runInstance)) {
+        if (hasAuthoritativeRunContext(runInstance, event.runId)) {
+          unownedOpenRunInstances.delete(runInstance);
+        } else {
+          unownedOpenRunInstances.delete(runInstance);
+          unownedOpenRunInstances.add(runInstance);
+        }
         return;
       }
       if (
         projection.terminal.outcome.reason === "completed" &&
         !pendingTerminals.has(runInstance)
       ) {
+        const attemptKey = agentAuditAttemptKey(
+          runInstance,
+          authoritativeAttempt?.attemptEpoch ?? attemptEpochByRunInstance.get(runInstance) ?? 0,
+        );
+        const incoming = {
+          attemptKey,
+          input: projection.input,
+          observedThroughSequence: event.seq,
+          ...projection.terminal,
+        };
+        const rejected = rejectedTerminalsByAttempt.get(attemptKey);
+        const selected = rejected
+          ? selectAgentAuditTerminalCandidate(rejected, incoming)
+          : incoming;
         openRunInstances.delete(runInstance);
-        if (writer.record(projection.input)) {
-          rememberSettled(runInstance);
+        const terminalAuthoritativeContext = getAuthoritativeRunContextToken(
+          runInstance,
+          event.runId,
+        );
+        if (terminalAuthoritativeContext) {
+          // The terminal has crossed the settle boundary even when the writer
+          // queues it for stop(); a later start therefore owns a new attempt.
+          if (authoritativeAttempt) {
+            openAuthoritativeRunContexts.set(terminalAuthoritativeContext, {
+              ...authoritativeAttempt,
+              open: false,
+            });
+          }
+          forgetAuthoritativeOpenRun(projectionState, runInstance, event.runId);
+        }
+        if (writer.record(selected.input)) {
+          forgetRejectedAttempt(attemptKey);
+          forgetOpenRun(projectionState, runInstance, event.runId);
+          retiredOpenRunInstances.delete(runInstance);
+          unownedOpenRunInstances.delete(runInstance);
+          attemptStartSequenceByRunInstance.delete(runInstance);
+          rememberSettled(runInstance, selected.observedThroughSequence);
+          if (!rejectedCountByRunInstance.has(runInstance)) {
+            attemptEpochByRunInstance.delete(runInstance);
+          }
+        } else {
+          rememberRejectedTerminal(runInstance, selected);
         }
         return;
       }
-      scheduleTerminal(runInstance, { input: projection.input, ...projection.terminal });
+      scheduleTerminal(runInstance, {
+        attemptKey: agentAuditAttemptKey(
+          runInstance,
+          authoritativeAttempt?.attemptEpoch ?? attemptEpochByRunInstance.get(runInstance) ?? 0,
+        ),
+        input: projection.input,
+        observedThroughSequence: event.seq,
+        ...projection.terminal,
+      });
     },
     recordTool: (event) => {
-      const input = projectToolExecutionEventToAudit(event);
+      const input = projectToolExecutionEventToAudit(projectionState, event);
       if (input) {
         writer.record(input);
       }
@@ -435,7 +697,24 @@ export function createAgentEventAuditRecorder(options?: {
       for (const runInstance of pendingTerminals.keys()) {
         flushPending(runInstance);
       }
-      await writer.stop();
+      try {
+        await writer.stop(
+          [...rejectedTerminalsByAttempt.values()].map((rejected) => rejected.input),
+        );
+      } finally {
+        unsubscribeRunContextRetirement();
+        // The registry remains authoritative when bounded projection entries
+        // are evicted. Shutdown releases every local projection.
+        projectionState.openRunProvenance.clear();
+        projectionState.runProvenance.clear();
+        projectionState.activeRunInstanceByRunId.clear();
+        projectionState.seenRunInstances.clear();
+        rejectedTerminalsByAttempt.clear();
+        rejectedCountByRunInstance.clear();
+        retiredOpenRunInstances.clear();
+        unownedOpenRunInstances.clear();
+        attemptEpochByRunInstance.clear();
+      }
     },
   };
 }
