@@ -18,6 +18,7 @@ import {
   type EmbeddedRunAttemptParams,
   type RuntimeToolSchemaDiagnostic,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
+import { createOpenClawCodingToolsForAgentHarness } from "openclaw/plugin-sdk/agent-harness-tool-runtime";
 import { resolveAgentDir } from "openclaw/plugin-sdk/agent-runtime";
 import { isToolAllowed } from "openclaw/plugin-sdk/sandbox";
 import { readCodexPluginConfig, type CodexPluginConfig } from "./config.js";
@@ -233,7 +234,8 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
     (agentHarnessModule ??= await import("openclaw/plugin-sdk/agent-harness"));
   const createOpenClawCodingTools =
     injectedOpenClawCodingToolsFactory ??
-    (await loadAgentHarnessModule()).createOpenClawCodingTools;
+    ((options: OpenClawCodingToolsOptions) =>
+      createOpenClawCodingToolsForAgentHarness(params, options));
   toolBuildStages.mark("load-agent-harness-tools");
   const sessionKeys = resolveOpenClawCodingToolsSessionKeys(params, input.sandboxSessionKey);
   const nativeExecutionPolicy = resolveCodexNativeExecutionPolicyForDynamicTools(input);
