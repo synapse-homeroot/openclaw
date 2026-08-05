@@ -182,22 +182,28 @@ export function assertSupportedTurn(params: SessionPlacementTurnParams): {
       "Cloud workers cannot currently preserve this scheduled turn's inherited native tool authority. Stop the cloud worker for this session, then retry locally with `openclaw gateway call sessions.reclaim`.",
     );
   }
-  if (
-    params.scheduledNativePolicy !== undefined &&
-    shouldCreateBundleMcpRuntimeForAttempt({
-      toolsEnabled: params.modelRun !== true && params.promptMode !== "none",
-      disableTools: params.disableTools,
-      toolsAllow: params.toolsAllow,
-    }) &&
-    resolveSessionMcpConfigSummary({
+  if (params.scheduledNativePolicy !== undefined) {
+    const mcpConfig = resolveSessionMcpConfigSummary({
       workspaceDir: params.workspaceDir,
       cfg: params.config,
       toolOverrides: params.toolOverrides,
-    }).serverNames.length > 0
-  ) {
-    throw new Error(
-      "Cloud workers cannot currently preserve this scheduled turn's MCP tool authority. Stop the cloud worker for this session, then retry locally with `openclaw gateway call sessions.reclaim`.",
-    );
+    });
+    // Cron caps already contain the final creator-visible names. Match those
+    // against static MCP namespaces; requester-scoped and unrelated plugin tools
+    // cannot become callable merely because some MCP server is configured.
+    if (
+      mcpConfig.staticToolNamePrefixes.length > 0 &&
+      shouldCreateBundleMcpRuntimeForAttempt({
+        toolsEnabled: params.modelRun !== true && params.promptMode !== "none",
+        disableTools: params.disableTools,
+        toolsAllow: params.toolsAllow,
+        toolNamePrefixes: mcpConfig.staticToolNamePrefixes,
+      })
+    ) {
+      throw new Error(
+        "Cloud workers cannot currently preserve this scheduled turn's MCP tool authority. Stop the cloud worker for this session, then retry locally with `openclaw gateway call sessions.reclaim`.",
+      );
+    }
   }
   const modelRef = resolveTurnModelRef(params);
   const explicitRuntime =

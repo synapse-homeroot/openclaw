@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { testing as mcpConnectionResolverTesting } from "../../agents/mcp-connection-resolver.js";
 import type { SessionPlacementTurnParams } from "../../agents/session-placement-admission.js";
 import { assertSupportedTurn } from "./worker-turn-payload.js";
 
 describe("assertSupportedTurn", () => {
+  afterEach(() => {
+    mcpConnectionResolverTesting.setMcpServerConnectionResolversForTest();
+  });
+
   it("accepts scheduled authority for the worker launch envelope", () => {
     expect(
       assertSupportedTurn({
@@ -143,5 +148,134 @@ describe("assertSupportedTurn", () => {
     } as SessionPlacementTurnParams;
 
     expect(assertSupportedTurn(turn)).toEqual({ provider: "openai", model: "gpt-5.4" });
+  });
+
+  it("rejects wildcard caps that can overlap a configured MCP namespace", () => {
+    const turn = {
+      sessionId: "session-wildcard-mcp",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp/workspace",
+      prompt: "run",
+      timeoutMs: 1_000,
+      runId: "run-wildcard-mcp",
+      provider: "openai",
+      model: "gpt-5.4",
+      config: {
+        agents: {
+          defaults: {
+            models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } },
+          },
+        },
+        mcp: { servers: { docs: { command: "docs" } } },
+      },
+      toolsAllow: ["*__search"],
+      scheduledNativePolicy: { version: 1, mode: "disabled" },
+    } as SessionPlacementTurnParams;
+
+    expect(() => assertSupportedTurn(turn)).toThrow(
+      /cannot currently preserve.*MCP tool authority/is,
+    );
+  });
+
+  it("accepts a final creator cap whose configured MCP tools were all denied", () => {
+    const turn = {
+      sessionId: "session-denied-mcp",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp/workspace",
+      prompt: "run",
+      timeoutMs: 1_000,
+      runId: "run-denied-mcp",
+      provider: "openai",
+      model: "gpt-5.4",
+      config: {
+        agents: {
+          defaults: {
+            models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } },
+          },
+        },
+        mcp: { servers: { docs: { command: "docs" } } },
+      },
+      // Creator caps contain only the final executable surface. The unrelated
+      // namespaced tool must not make configured docs MCP look reachable.
+      toolsAllow: ["maniple__check_idle_workers"],
+      toolOverrides: { mcpToolsDeny: { docs: ["read_docs"] } },
+      scheduledNativePolicy: { version: 1, mode: "disabled" },
+    } as SessionPlacementTurnParams;
+
+    expect(assertSupportedTurn(turn)).toEqual({ provider: "openai", model: "gpt-5.4" });
+  });
+
+  it("accepts requester-scoped MCP that senderless scheduled turns cannot resolve", () => {
+    const resolve = vi.fn(async () => null);
+    mcpConnectionResolverTesting.setMcpServerConnectionResolversForTest([
+      { serverName: "user-mail", resolve },
+    ]);
+    const turn = {
+      sessionId: "session-requester-mcp",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp/workspace",
+      prompt: "run",
+      timeoutMs: 1_000,
+      runId: "run-requester-mcp",
+      provider: "openai",
+      model: "gpt-5.4",
+      config: {
+        agents: {
+          defaults: {
+            models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } },
+          },
+        },
+        mcp: {
+          servers: {
+            "user-mail": { transport: "streamable-http", url: "https://example.test/mcp" },
+          },
+        },
+      },
+      toolsAllow: ["user-mail__inbox"],
+      scheduledNativePolicy: { version: 1, mode: "disabled" },
+    } as SessionPlacementTurnParams;
+
+    expect(assertSupportedTurn(turn)).toEqual({ provider: "openai", model: "gpt-5.4" });
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("rejects only the retained static namespace in mixed scoped MCP config", () => {
+    const resolve = vi.fn(async () => null);
+    mcpConnectionResolverTesting.setMcpServerConnectionResolversForTest([
+      { serverName: "user-mail", resolve },
+    ]);
+    const base = {
+      sessionId: "session-mixed-mcp",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp/workspace",
+      prompt: "run",
+      timeoutMs: 1_000,
+      runId: "run-mixed-mcp",
+      provider: "openai",
+      model: "gpt-5.4",
+      config: {
+        agents: {
+          defaults: {
+            models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } },
+          },
+        },
+        mcp: {
+          servers: {
+            shared: { command: "shared" },
+            "user-mail": { transport: "streamable-http", url: "https://example.test/mcp" },
+          },
+        },
+      },
+      scheduledNativePolicy: { version: 1 as const, mode: "disabled" as const },
+    } as SessionPlacementTurnParams;
+
+    expect(assertSupportedTurn({ ...base, toolsAllow: ["user-mail__inbox"] })).toEqual({
+      provider: "openai",
+      model: "gpt-5.4",
+    });
+    expect(() => assertSupportedTurn({ ...base, toolsAllow: ["shared__search"] })).toThrow(
+      /cannot currently preserve.*MCP tool authority/is,
+    );
+    expect(resolve).not.toHaveBeenCalled();
   });
 });

@@ -3221,6 +3221,7 @@ describe("requester-scoped MCP connection resolution", () => {
       toolOverrides,
     });
     expect(overriddenSummary.serverNames).toEqual(["user-mail"]);
+    expect(overriddenSummary.staticToolNamePrefixes).toEqual(["user-mail__"]);
     expect(overriddenSummary.fingerprint).toBe(overriddenRuntime.configFingerprint);
 
     // With a resolver registered, tools.effective peeks the bare static-partition
@@ -3235,9 +3236,26 @@ describe("requester-scoped MCP connection resolution", () => {
       requesterSenderId: "sender-a",
     });
     const peeked = manager.peekSession({ sessionId: "session-parity-scoped" });
-    expect(peeked?.configFingerprint).toBe(
-      resolveSessionMcpConfigSummary({ workspaceDir: "/workspace", cfg: cfg as never }).fingerprint,
-    );
+    const scopedSummary = resolveSessionMcpConfigSummary({
+      workspaceDir: "/workspace",
+      cfg: cfg as never,
+    });
+    expect(peeked?.configFingerprint).toBe(scopedSummary.fingerprint);
+    expect(scopedSummary.serverNames).toEqual(["shared", "user-mail"]);
+    expect(scopedSummary.staticToolNamePrefixes).toEqual(["shared__"]);
+
+    const collisionSummary = resolveSessionMcpConfigSummary({
+      workspaceDir: "/workspace",
+      cfg: {
+        mcp: {
+          servers: {
+            "user-mail": { command: "true" },
+            "user mail": { command: "true" },
+          },
+        },
+      } as never,
+    });
+    expect(collisionSummary.staticToolNamePrefixes).toEqual(["user-mail-2__"]);
 
     await manager.disposeAll();
   });
