@@ -8,6 +8,7 @@ import type { PluginManifestRegistry } from "../plugins/manifest-registry.js";
 import { PluginLruCache } from "../plugins/plugin-cache-primitives.js";
 import { registerPluginMetadataProcessMemoLifecycleClear } from "../plugins/plugin-metadata-lifecycle.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { mcpToolFilterExcludesAll } from "./agent-bundle-mcp-filter.js";
 import { assignSafeServerNames, TOOL_NAME_SEPARATOR } from "./agent-bundle-mcp-names.js";
 import { loadEmbeddedAgentMcpConfig } from "./embedded-agent-mcp.js";
 import {
@@ -315,10 +316,14 @@ export function resolveSessionMcpConfigSummary(params: {
   // Requester-independent callers can reach only the static partition. Keep
   // prefixes from the full declaration-order assignment or colliding server
   // names could be attributed to the wrong namespace.
-  const staticToolNamePrefixes = Object.keys(staticServers).map(
-    (serverName) =>
-      `${safeServerNamesByServer.get(serverName) ?? serverName}${TOOL_NAME_SEPARATOR}`,
-  );
+  const staticToolNamePrefixes = Object.entries(staticServers)
+    // A universal exclude also hides resources/prompts utilities. Exact filters
+    // cannot be inverted from sanitized model-facing names, so stay conservative.
+    .filter(([, server]) => !mcpToolFilterExcludesAll(server.toolFilter))
+    .map(
+      ([serverName]) =>
+        `${safeServerNamesByServer.get(serverName) ?? serverName}${TOOL_NAME_SEPARATOR}`,
+    );
   const { fingerprint: bareRuntimeFingerprint } = loadSessionMcpConfig({
     workspaceDir: params.workspaceDir,
     cfg: params.cfg,

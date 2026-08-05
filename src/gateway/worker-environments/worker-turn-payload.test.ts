@@ -125,6 +125,70 @@ describe("assertSupportedTurn", () => {
     expect(assertSupportedTurn(turn)).toEqual({ provider: "openai", model: "gpt-5.4" });
   });
 
+  it("accepts scheduled configured MCP when its tool filter excludes the whole server", () => {
+    const turn = {
+      sessionId: "session-filtered-server",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp/workspace",
+      prompt: "run",
+      timeoutMs: 1_000,
+      runId: "run-filtered-server",
+      provider: "openai",
+      model: "gpt-5.4",
+      config: {
+        agents: {
+          defaults: {
+            models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } },
+          },
+        },
+        mcp: {
+          servers: {
+            docs: { command: "docs", toolFilter: { exclude: ["*"] } },
+            shared: { command: "shared" },
+          },
+        },
+      },
+      toolsAllow: ["docs__read_docs"],
+      scheduledNativePolicy: { version: 1, mode: "disabled" },
+    } as SessionPlacementTurnParams;
+
+    expect(assertSupportedTurn(turn)).toEqual({ provider: "openai", model: "gpt-5.4" });
+    expect(() => assertSupportedTurn({ ...turn, toolsAllow: ["shared__search"] })).toThrow(
+      /cannot currently preserve.*MCP tool authority/is,
+    );
+  });
+
+  it("keeps exact per-tool filters fail-closed with reauthorization guidance", () => {
+    const turn = {
+      sessionId: "session-filtered-tool",
+      sessionFile: "/tmp/session.jsonl",
+      workspaceDir: "/tmp/workspace",
+      prompt: "run",
+      timeoutMs: 1_000,
+      runId: "run-filtered-tool",
+      provider: "openai",
+      model: "gpt-5.4",
+      config: {
+        agents: {
+          defaults: {
+            models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } },
+          },
+        },
+        mcp: {
+          servers: {
+            docs: { command: "docs", toolFilter: { exclude: ["read_docs"] } },
+          },
+        },
+      },
+      toolsAllow: ["docs__read_docs"],
+      scheduledNativePolicy: { version: 1, mode: "disabled" },
+    } as SessionPlacementTurnParams;
+
+    expect(() => assertSupportedTurn(turn)).toThrow(
+      /cannot currently preserve.*MCP tool authority.*reauthorize.*sessions\.reclaim/is,
+    );
+  });
+
   it("accepts a finite cap that cannot reach configured MCP", () => {
     const turn = {
       sessionId: "session-1",

@@ -201,7 +201,7 @@ export function assertSupportedTurn(params: SessionPlacementTurnParams): {
       })
     ) {
       throw new Error(
-        "Cloud workers cannot currently preserve this scheduled turn's MCP tool authority. Stop the cloud worker for this session, then retry locally with `openclaw gateway call sessions.reclaim`.",
+        "Cloud workers cannot currently preserve this scheduled turn's stored MCP tool authority safely. If those MCP tools were intentionally removed or filtered, reauthorize the automation's tool cap with `openclaw automations edit <id> --tools <tool,...>` before retrying. Otherwise, reclaim the session with `openclaw gateway call sessions.reclaim --params '{\"key\":\"<session-key>\"}'` and retry locally.",
       );
     }
   }
