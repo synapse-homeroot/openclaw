@@ -155,7 +155,7 @@ describe("Code Mode catalog and model-visible surface", () => {
     });
 
     const execTool = compacted.tools.find((tool) => tool.name === CODE_MODE_EXEC_TOOL_NAME);
-    expect(execTool?.description).toContain("Use `return` to pass the final value back");
+    expect(execTool?.description).toContain("Use `return` for the final value");
   });
 
   it("hides normal tools when only the active agent enables code mode", () => {
@@ -206,38 +206,83 @@ describe("Code Mode catalog and model-visible surface", () => {
     expect(language).not.toHaveProperty("oneOf");
   });
 
-  it("describes code-mode runtime constraints in the model-visible exec schema", () => {
+  it("describes deterministic OpenClaw Code Mode composition in the exec schema", () => {
     const { tools } = createCodeModeHarness();
     const execTool = expectDefined(tools[0], "tools[0] test invariant");
     const parameters = execTool.parameters as {
       properties?: Record<string, Record<string, unknown>>;
     };
+    const hasBlanketTechniqueObservationGuidance = (value: string | undefined) =>
+      (value ?? "").split(/[.!?;]\s*/).some((clause) => {
+        const namesTechnique = /\b(?:fuzzy|rank(?:ed|ing)?|semantic)\b/i.test(clause);
+        const prescribesObservation =
+          /\b(?:waits?|returns?|observ(?:e|es|ed|ing|ation)|requires?|forces?|triggers?|later exec)\b/i.test(
+            clause,
+          );
+        const negatesObservation =
+          /\b(?:does|do|is|are|should|must|need)\s+not\b[^.!?;]{0,80}\b(?:require|force|trigger|wait|return|observe|observation)\b/i.test(
+            clause,
+          ) ||
+          /\bnever\b[^.!?;]{0,80}\b(?:require|force|trigger|wait|return|observe|observation)\b/i.test(
+            clause,
+          );
+        const scopesToGenuineAmbiguity =
+          /\bonly\b[^.!?;]{0,80}\b(?:genuine ambiguity|genuinely ambiguous)\b/i.test(clause);
+        return (
+          namesTechnique &&
+          prescribesObservation &&
+          !negatesObservation &&
+          !scopesToGenuineAmbiguity
+        );
+      });
 
-    expect(execTool.description).toContain("Node.js modules");
-    expect(execTool.description).toContain("`require`/`import` are NOT available");
-    expect(execTool.description).toContain("process them in the first exec");
-    expect(execTool.description).toContain("do not spend another exec inspecting");
-    expect(execTool.description).toContain("dependent reads, checks, and follow-up calls in order");
-    expect(execTool.description).toContain("normal tool policy and approvals");
+    expect(
+      hasBlanketTechniqueObservationGuidance(
+        "Fuzzy, ranked, or semantic selection waits for observation.",
+      ),
+    ).toBe(true);
+    expect(
+      hasBlanketTechniqueObservationGuidance(
+        "Fuzzy matching alone does not require observation; only genuine ambiguity does.",
+      ),
+    ).toBe(false);
+
+    expect(execTool.description).toContain("Run JavaScript or TypeScript in OpenClaw Code Mode");
+    expect(execTool.description).toContain("deterministic one-cell composition");
+    expect(execTool.description).toContain("request/context exact target id");
+    expect(execTool.description).toContain(
+      "exactly one exact match verified in code with `matches.length === 1`",
+    );
+    expect(execTool.description).toContain(
+      "only while target identity remains genuinely ambiguous",
+    );
+    expect(execTool.description).toContain(
+      "conflicting authority/permission/ownership evidence before mutation",
+    );
+    expect(execTool.description).toContain("Compose dependent reads, checks, and calls in order");
+    expect(execTool.description).toContain("Nested calls enforce policy and approvals");
     expect(execTool.description).toContain("`ALL_TOOLS` is the complete compact catalog");
     expect(execTool.description).toContain("`tools.search(query: string, options?)`");
-    expect(execTool.description).toContain("enabled catalog tools allowed by policy");
+    expect(execTool.description).toContain(
+      "guest runtime provides JavaScript/TypeScript globals plus enabled catalog tools",
+    );
     expect(execTool.description).toContain("`tools.describe(id: string)`");
     expect(execTool.description).toContain("`tools.callValue(id: string, args?)`");
     expect(execTool.description).toContain("`tools.call(id: string, args?)`");
-    expect(execTool.description).toContain("Never invent or transform a tool id");
-    expect(execTool.description).toContain("Quick-index arrows show trusted declared output hints");
-    expect(execTool.description).toContain("`-> ?` means never guess result field names");
-    expect(execTool.description).toContain("never guess result field names");
-    expect(execTool.description).toContain("return the raw tool value unchanged");
-    expect(execTool.description).toContain("final dependent call after declared-output calls");
-    expect(execTool.description).toContain("do not wrap it in the requested answer shape");
-    expect(execTool.description).toContain("filter or map it only in a later exec");
-    expect(execTool.description).toContain("returns its JSON value directly");
-    expect(execTool.description).toContain("const hit = ALL_TOOLS.find");
+    expect(execTool.description).toContain("Use the exact tool id unchanged");
+    expect(execTool.description).toContain("Quick-index arrows are trusted output hints");
+    expect(execTool.description).toContain("`-> ?` marks schema ambiguity");
+    expect(execTool.description).toContain("stays raw for observation");
+    expect(execTool.description).toContain("final dependent call");
+    expect(execTool.description).toContain("transform it in a later exec");
+    expect(execTool.description).toContain("returns its JSON value");
+    expect(execTool.description).toContain(
+      'tools.callValue("openclaw:core:read",{path:"notes.txt"})',
+    );
     expect(execTool.description).toContain('"javascript" or "typescript"');
-    expect(execTool.description).toContain("never a shell command");
-    expect(execTool.description).toContain("do not retry failed shell source");
+    expect(execTool.description).toContain("code` field contains JavaScript or TypeScript source");
+    expect(hasBlanketTechniqueObservationGuidance(execTool.description)).toBe(false);
+    expect(execTool.description).not.toContain("NOT available");
     const nodesGuidance =
       "- nodes: paired Gateway nodes; nodes.list(), (await nodes.get(id)).invoke(command, params)";
     expect(execTool.description).toContain(nodesGuidance);
@@ -245,29 +290,62 @@ describe("Code Mode catalog and model-visible surface", () => {
       execTool.description.lastIndexOf(nodesGuidance),
     );
 
-    expect(parameters.properties?.code?.description).toContain("no Python, shell");
     expect(parameters.properties?.code?.description).toContain(
-      "a trailing expression is discarded and yields `null`",
+      "Run JavaScript or TypeScript in OpenClaw Code Mode",
+    );
+    expect(parameters.properties?.code?.description).toContain("trailing expressions yield `null`");
+    expect(parameters.properties?.code?.description).toContain("`callValue` returns data");
+    expect(parameters.properties?.code?.description).toContain("return raw, then parse later");
+    expect(parameters.properties?.code?.description).toContain(
+      "deterministic one-cell composition",
+    );
+    expect(parameters.properties?.code?.description).toContain("use a request/context exact id");
+    expect(parameters.properties?.code?.description).toContain(
+      "verify one exact match with `matches.length === 1`",
     );
     expect(parameters.properties?.code?.description).toContain(
-      'tools.callValue("openclaw:core:read", { path: "notes.txt" })',
-    );
-    expect(parameters.properties?.code?.description).toContain("Use `callValue`, not `call`");
-    expect(parameters.properties?.code?.description).toContain("return file.content");
-    expect(parameters.properties?.code?.description).toContain(
-      "return it first, then parse it in a later exec",
+      "while identity is genuinely ambiguous",
     );
     expect(parameters.properties?.code?.description).toContain(
-      "exact ids from `ALL_TOOLS` or `tools.search(query)`",
+      "conflicting authority/permission/ownership evidence before mutation",
+    );
+    expect(parameters.properties?.code?.description).toContain(
+      "Resolve exact tool ids from `ALL_TOOLS` or `tools.search(query)`",
     );
     expect(parameters.properties?.code?.description).toContain("`ALL_TOOLS`");
-    expect(parameters.properties?.code?.description).toContain("`require`, `import`");
+    expect(
+      hasBlanketTechniqueObservationGuidance(
+        parameters.properties?.code?.description as string | undefined,
+      ),
+    ).toBe(false);
+    expect(parameters.properties?.code?.description).not.toContain("no Python/shell");
     expect(parameters.properties).not.toHaveProperty("restartSafe");
     expect(parameters.properties?.language?.description).toContain(
       'Must be "javascript" or "typescript"',
     );
     expect(parameters).toMatchObject({ required: ["code"] });
     expect(parameters.properties).not.toHaveProperty("command");
+  });
+
+  it("rebuilds the model-visible exec guidance deterministically", () => {
+    const build = () => {
+      const { config, catalogRef, tools } = createCodeModeHarness();
+      const compacted = applyCodeModeCatalog({
+        tools: [...tools, pluginTool("fake_noop", "Noop")],
+        config,
+        sessionId: "session-code-mode",
+        sessionKey: "agent:main:main",
+        runId: "run-code-mode",
+        catalogRef,
+      });
+      const execTool = expectDefined(compacted.tools[0], "exec tool test invariant");
+      return {
+        description: execTool.description,
+        parameters: execTool.parameters,
+      };
+    };
+
+    expect(build()).toEqual(build());
   });
 
   it("keeps code-mode exec guidance compact without advertising unavailable namespaces", () => {
@@ -288,7 +366,7 @@ describe("Code Mode catalog and model-visible surface", () => {
     const codeDescription = parameters.properties?.code?.description;
 
     expect(execTool.description.length).toBeLessThan(2_400);
-    expect(execTool.description).toContain("parallelize independent work only");
+    expect(execTool.description).toContain("parallelize independent work");
     expect(codeDescription).toEqual(expect.any(String));
     expect(String(codeDescription).length).toBeLessThan(620);
     expect(codeDescription).not.toContain("MCP namespace globals");
@@ -313,6 +391,12 @@ describe("Code Mode catalog and model-visible surface", () => {
     const description = compacted.tools[0]?.description ?? "";
     expect(description).toContain("descriptions are intentionally deferred");
     expect(description).toContain("OUTPUT DECLARED RULE");
+    expect(description).toContain("deterministic one-cell composition");
+    expect(description).toContain(
+      "request/context exact id or exactly one exact match checked in code",
+    );
+    expect(description).toContain("only while target identity is genuinely ambiguous");
+    expect(description).toContain("authority/permission/ownership evidence conflicts");
     expect(description).toContain(
       '- "openclaw:fake-code-mode:alpha_tool" { value?: string } -> Array<{ id: string; score: number }>',
     );

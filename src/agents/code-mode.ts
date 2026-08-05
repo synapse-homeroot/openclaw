@@ -74,8 +74,8 @@ const MAX_CODE_MODE_CATALOG_INDEX_CHARS = 8_000;
 const CODE_MODE_CATALOG_INDEX_HEADING = [
   "OpenClaw/plugin tool quick index (exact ids; descriptions are intentionally deferred):",
   "Each line is `id input -> output`; `-> ?` means unknown.",
-  "OUTPUT DECLARED RULE: use declared fields for dependent calls in the first exec.",
-  "OUTPUT UNKNOWN RULE: return the raw tool value unchanged; inspect or map it only in a later exec.",
+  "OUTPUT DECLARED RULE: declared fields support deterministic one-cell composition; a request/context exact id or exactly one exact match checked in code may read and mutate inline; return evidence only while target identity is genuinely ambiguous or authority/permission/ownership evidence conflicts.",
+  "OUTPUT UNKNOWN RULE: unknown output shape is schema ambiguity; return the raw tool value unchanged, then inspect or map it in a later exec.",
 ].join("\n");
 
 function codeModeCatalogIndexFooter(included: number, total: number): string {
@@ -163,15 +163,14 @@ function createCodeModeExecDescription(
     : "";
   const catalogIndex = catalog ? formatCodeModeCatalogIndex(catalog) : "";
   return (
-    "Run JavaScript or TypeScript in OpenClaw code mode. Use `return` to pass the final value back; otherwise the result is `null`. Quick-index arrows show trusted declared output hints; `-> ?` means never guess result field names. For declared fields, process them in the first exec; do not spend another exec inspecting them. Perform dependent reads, checks, and follow-up calls in order; parallelize independent work only. For an unknown output, including a final dependent call after declared-output calls, return the raw tool value unchanged; do not wrap it in the requested answer shape or guess fields; filter or map it only in a later exec. Nested calls enforce normal tool policy and approvals. `ALL_TOOLS` is the complete compact catalog. Select exact ids directly or with `tools.search(query: string, options?)`; use `tools.describe(id: string)` only when needed. Never invent or transform a tool id. `tools.callValue(id: string, args?)` returns its JSON value directly; `tools.call(id: string, args?)` preserves `{ tool, result }`. Example: `const hit = ALL_TOOLS.find((entry) => entry.description.includes('weather')) ?? (await tools.search('weather'))[0]; return await tools.callValue(hit.id, {});`. Node.js modules and `require`/`import` are NOT available; use enabled catalog tools allowed by policy for shell, file, network, or external actions." +
+    'Run JavaScript or TypeScript in OpenClaw Code Mode. Use `return` for the final value; a trailing expression yields `null`. Quick-index arrows are trusted output hints; `-> ?` marks schema ambiguity. Declared schemas support deterministic one-cell composition. A request/context exact target id or exactly one exact match verified in code with `matches.length === 1` can read and mutate inline. Return candidates only while target identity remains genuinely ambiguous. Return conflicting authority/permission/ownership evidence before mutation. Compose dependent reads, checks, and calls in order; parallelize independent work. Unknown output shape, including a final dependent call, stays raw for observation; transform it in a later exec. Nested calls enforce policy and approvals. `ALL_TOOLS` is the complete compact catalog. Select exact ids directly or with `tools.search(query: string, options?)`; use `tools.describe(id: string)` only when needed. Use the exact tool id unchanged. `tools.callValue(id: string, args?)` returns its JSON value; `tools.call(id: string, args?)` preserves `{ tool, result }`. Example: `return await tools.callValue("openclaw:core:read",{path:"notes.txt"});`. The guest runtime provides JavaScript/TypeScript globals plus enabled catalog tools for shell, file, network, and external actions.' +
     apiGuidance +
     mcpGuidance +
     swarmGuidance +
     nodesGuidance +
     skillsGuidance +
-    ' The `language` field accepts only "javascript" or "typescript"; do not pass "bash", "shell", or other values.' +
-    " The `code` field contains JavaScript or TypeScript, never a shell command. " +
-    "For shell or file operations, call the exact catalog tool from guest JavaScript; do not retry failed shell source." +
+    ' The `language` field selects "javascript" or "typescript".' +
+    " The `code` field contains JavaScript or TypeScript source. Use exact catalog tools from guest JavaScript for shell or file operations." +
     (namespacePrompt ? `\n\n${namespacePrompt}` : "") +
     (catalogIndex ? `\n\n${catalogIndex}` : "")
   );
@@ -187,7 +186,7 @@ export function createCodeModeTools(ctx: CodeModeToolContext): AnyAgentTool[] {
       // model-facing field prevents schema-valid empty calls from constrained models.
       code: Type.String({
         description:
-          'Required JS/TS; no Python, shell, `require`, `import`. Use explicit `return value`; a trailing expression is discarded and yields `null`. Use `callValue`, not `call`, for data; `call` wraps it under `.result`. Core text reads: `{kind:"text",content:string}`; use `.content`. Unknown format: return it first, then parse it in a later exec; never guess separators. Example: `const file=await tools.callValue("openclaw:core:read", { path: "notes.txt" }); if(file.kind!=="text") return file; return file.content;`. Use exact ids from `ALL_TOOLS` or `tools.search(query)`; never invent ids or parallelize dependent calls.',
+          "Run JavaScript or TypeScript in OpenClaw Code Mode. `return value` produces the result; trailing expressions yield `null`. `callValue` returns data. Declared schemas support deterministic one-cell composition: use a request/context exact id, or verify one exact match with `matches.length === 1`, before inline mutation. Return candidates while identity is genuinely ambiguous; return conflicting authority/permission/ownership evidence before mutation. Unknown output shape is schema ambiguity: return raw, then parse later. Resolve exact tool ids from `ALL_TOOLS` or `tools.search(query)`; order dependent calls.",
       }),
       language: optionalStringEnum(["javascript", "typescript"] as const, {
         description:
