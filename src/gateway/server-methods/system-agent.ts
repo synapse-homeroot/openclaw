@@ -58,6 +58,7 @@ import {
   getSystemAgentChatInputError,
   runSystemAgentChatInput,
 } from "./system-agent-chat-turn.js";
+import { getSystemAgentSessionQueue } from "./system-agent-session-queue.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
 import { assertValidParams } from "./validation.js";
 
@@ -80,21 +81,6 @@ const PROVIDER_AUTH_SESSION_TIMEOUT_MS = 25 * 60 * 1000;
 const PROVIDER_PREPARE_SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const SYSTEM_AGENT_GATEWAY_EXECUTION_KEY = "gateway";
 const systemAgentGatewayExecutionQueue = new KeyedAsyncQueue();
-const systemAgentSessionQueues = new WeakMap<
-  Map<string, SystemAgentChatSession>,
-  KeyedAsyncQueue
->();
-
-function getSystemAgentSessionQueue(
-  sessions: Map<string, SystemAgentChatSession>,
-): KeyedAsyncQueue {
-  let queue = systemAgentSessionQueues.get(sessions);
-  if (!queue) {
-    queue = new KeyedAsyncQueue();
-    systemAgentSessionQueues.set(sessions, queue);
-  }
-  return queue;
-}
 
 function acknowledgeDeliveredSystemAgentWelcome(session: SystemAgentChatSession): void {
   const auditSequence = session.welcomeAuditSequence;
@@ -155,11 +141,14 @@ async function evictOldestSession(
   }
   if (oldestKey !== undefined) {
     const oldest = sessions.get(oldestKey);
-    if (oldest?.pendingApproval) {
+    if (!oldest) {
+      return;
+    }
+    sessions.delete(oldestKey);
+    if (oldest.pendingApproval) {
       context.systemAgentApprovalManager?.expire(oldest.pendingApproval.id, "session-evicted");
     }
-    await oldest?.engine.dispose();
-    sessions.delete(oldestKey);
+    await oldest.engine.dispose();
   }
 }
 

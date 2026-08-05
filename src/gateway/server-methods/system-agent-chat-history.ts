@@ -1,6 +1,7 @@
 import { validateSystemAgentChatHistoryParams } from "../../../packages/gateway-protocol/src/index.js";
 import { resolveSystemAgentDelegationKey } from "../../system-agent/delegation-session.js";
 import { readTranscriptTail } from "../../system-agent/transcript-store.js";
+import { getSystemAgentSessionQueue } from "./system-agent-session-queue.js";
 import type { GatewayClient, GatewayRequestHandler } from "./types.js";
 import { assertValidParams } from "./validation.js";
 
@@ -46,19 +47,36 @@ export const systemAgentChatHistoryHandler: GatewayRequestHandler = async ({
   ) {
     return;
   }
-  const turns = readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT);
-  const session = params.sessionId ? context.systemAgentSessions.get(params.sessionId) : undefined;
+  const requestedSessionId = params.sessionId;
+  const session = requestedSessionId
+    ? context.systemAgentSessions.get(requestedSessionId)
+    : undefined;
   const ownerKey = resolveSystemAgentSessionOwnerKey({ client });
-  let step;
-  if (session && ownerKey === session.ownerKey) {
-    session.lastUsedAt = Date.now();
-    step = await session.engine.activeWizardStep();
-  }
+  const recovery =
+    requestedSessionId && session && ownerKey === session.ownerKey
+      ? await getSystemAgentSessionQueue(context.systemAgentSessions).enqueue(
+          requestedSessionId,
+          async () => {
+            if (context.systemAgentSessions.get(requestedSessionId) !== session) {
+              return undefined;
+            }
+            session.lastUsedAt = Date.now();
+            return {
+              turns: readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT),
+              step: await session.engine.activeWizardStep(),
+            };
+          },
+        )
+      : undefined;
+  const turns =
+    recovery?.turns ?? readTranscriptTail(params.limit ?? DEFAULT_SYSTEM_AGENT_HISTORY_LIMIT);
   respond(
     true,
     {
       turns,
-      ...(params.sessionId && step ? { activeWizard: { sessionId: params.sessionId, step } } : {}),
+      ...(requestedSessionId && recovery?.step
+        ? { activeWizard: { sessionId: requestedSessionId, step: recovery.step } }
+        : {}),
     },
     undefined,
   );
