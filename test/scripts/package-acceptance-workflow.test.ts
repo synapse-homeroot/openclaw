@@ -1278,6 +1278,9 @@ describe("package acceptance workflow", () => {
     const hydrateGithub = workflowJob(CRABBOX_HYDRATE_WORKFLOW, "hydrate-github");
 
     expect(crabboxConfig.actions?.job).toBe("hydrate");
+    expect(readWorkflow(CRABBOX_HYDRATE_WORKFLOW).env?.PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN).toBe(
+      "false",
+    );
     expect(hydrate.if).toBe(
       "${{ inputs.crabbox_job != 'hydrate-github' && inputs.crabbox_job != 'hydrate-windows-daemon' }}",
     );
@@ -1387,6 +1390,7 @@ describe("package acceptance workflow", () => {
     expect(workflowStep(hydrate, "Ensure SSH is available").if).toBeUndefined();
     expect(workflowStep(hydrate, "Hydrate provider env helper").if).toBeUndefined();
     const markCrabboxReady = workflowStep(hydrate, "Mark Crabbox ready").run;
+    expect(markCrabboxReady).toContain("export PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=install");
     expect(markCrabboxReady).toContain("COREPACK_HOME");
     expect(markCrabboxReady).toContain("OPENCLAW_CRABBOX_DOCKER_AVAILABLE");
     expect(markCrabboxReady).toContain("PNPM_CONFIG_PACKAGE_IMPORT_METHOD");
@@ -1446,10 +1450,14 @@ describe("package acceptance workflow", () => {
       "--no-tags --no-progress --prune --no-recurse-submodules --depth=50",
     );
     expect(hydrateWindowsFetch.run).toContain('"+refs/heads/main:refs/remotes/origin/main"');
-    expect(workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready").shell).toBe("powershell");
-    expect(workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready").run).toContain('"NODE_BIN"');
-    expect(workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready").run).toContain('"PNPM_HOME"');
-    expect(workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready").run).toContain('"PATH"');
+    const markHydrateWindowsReady = workflowStep(hydrateWindowsDaemon, "Mark Crabbox ready");
+    expect(markHydrateWindowsReady.shell).toBe("powershell");
+    expect(markHydrateWindowsReady.run).toContain(
+      '$env:PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN = "install"',
+    );
+    expect(markHydrateWindowsReady.run).toContain('"NODE_BIN"');
+    expect(markHydrateWindowsReady.run).toContain('"PNPM_HOME"');
+    expect(markHydrateWindowsReady.run).toContain('"PATH"');
     expect(workflowText).toContain("OPENCLAW_CRABBOX_HYDRATE_DOWNLOAD_TIMEOUT_SECONDS:-300");
     expect(workflowText).toContain("OPENCLAW_CRABBOX_HYDRATE_DOWNLOAD_RETRIES:-3");
     expect(workflowText).toContain("--retry-all-errors");
@@ -1468,6 +1476,7 @@ describe("package acceptance workflow", () => {
     expect(hydrateGithubCrabboxShell).toContain('readlink -f "$target"');
     expect(hydrateGithubCrabboxShell).toContain("link_node_tool corepack");
     const markHydrateGithubReady = workflowStep(hydrateGithub, "Mark Crabbox ready").run;
+    expect(markHydrateGithubReady).toContain("export PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=install");
     expect(markHydrateGithubReady).toContain("OPENCLAW_CRABBOX_DOCKER_AVAILABLE");
     expect(markHydrateGithubReady).toContain("PNPM_CONFIG_PACKAGE_IMPORT_METHOD");
     expect(workflowStep(hydrateGithub, "Hydrate provider env helper").env?.FACTORY_API_KEY).toBe(

@@ -1141,7 +1141,8 @@ describe("scripts/changed-lanes", () => {
     ).toBe(true);
     expect(changedCheckRequiresRemote(result)).toBe(true);
 
-    expect(buildChangedCheckCrabboxArgs(["--base", "origin/main", "--head", "HEAD"])).toEqual([
+    const crabboxArgs = buildChangedCheckCrabboxArgs(["--base", "origin/main", "--head", "HEAD"]);
+    expect(crabboxArgs).toEqual([
       "scripts/crabbox-wrapper.mjs",
       "run",
       "--workload",
@@ -1156,7 +1157,6 @@ describe("scripts/changed-lanes", () => {
       "OPENCLAW_CHECK_CHANGED_REMOTE_CHILD=1",
       "OPENCLAW_CHANGED_LANES_RAW_SYNC=1",
       "CI=1",
-      "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false",
       "corepack",
       "pnpm",
       "check:changed",
@@ -1165,6 +1165,7 @@ describe("scripts/changed-lanes", () => {
       "--head",
       "HEAD",
     ]);
+    expect(crabboxArgs).not.toContain("PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false");
   });
 
   it("routes a changed export signature remotely through its own source lane", () => {

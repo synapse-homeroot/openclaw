@@ -844,7 +844,6 @@ describe("scripts/crabbox-wrapper", () => {
         "OPENCLAW_CHECK_CHANGED_REMOTE_CHILD=1",
         "OPENCLAW_CHANGED_LANES_RAW_SYNC=1",
         "CI=1",
-        "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false",
         "corepack",
         "pnpm",
         "check:changed",
@@ -856,6 +855,7 @@ describe("scripts/crabbox-wrapper", () => {
     expect(output.args).not.toContain("blacksmith-testbox");
     expect(output.args).toContain("90m");
     expect(output.args).toContain("240m");
+    expect(output.args).not.toContain("PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false");
     expect(output.args.slice(-3)).toEqual(["corepack", "pnpm", "check:changed"]);
     expect(result.stderr).toContain("route workload=ci-fast selected=daytona");
   });
