@@ -172,7 +172,7 @@ function requireMockArg(mock: ReturnType<typeof vi.fn>, callIndex = 0, argIndex 
 }
 
 describe("googlechatPlugin outbound", () => {
-  it("declares durable text and thread delivery with receipt proofs", async () => {
+  it("declares durable text, remote media, and thread delivery with receipt proofs", async () => {
     sendGoogleChatMessageMock.mockResolvedValue({
       messageName: "spaces/AAA/messages/msg-1",
     });
@@ -191,6 +191,21 @@ describe("googlechatPlugin outbound", () => {
           });
           expect(result?.receipt.parts[0]?.kind).toBe("text");
           expect(result?.receipt.platformMessageIds).toEqual(["spaces/AAA/messages/msg-1"]);
+        },
+        media: async () => {
+          sendGoogleChatMessageMock.mockClear();
+          const result = await googlechatMessageAdapter.send?.media?.({
+            cfg,
+            to: "spaces/AAA",
+            text: "caption",
+            mediaUrl: "https://example.invalid/image.png",
+            threadId: "thread-media",
+          });
+          expect(result?.receipt.parts[0]?.kind).toBe("media");
+          expect(requireMockArg(sendGoogleChatMessageMock)).toMatchObject({
+            text: "caption\n\nAttachment: https://example.invalid/image.png",
+            thread: "thread-media",
+          });
         },
         thread: async () => {
           sendGoogleChatMessageMock.mockClear();
@@ -214,7 +229,7 @@ describe("googlechatPlugin outbound", () => {
     });
     expect(proofs).toStrictEqual([
       { capability: "text", status: "verified" },
-      { capability: "media", status: "not_declared" },
+      { capability: "media", status: "verified" },
       { capability: "poll", status: "not_declared" },
       { capability: "payload", status: "not_declared" },
       { capability: "silent", status: "not_declared" },
@@ -270,6 +285,49 @@ describe("googlechatPlugin outbound", () => {
       text: "top level",
     });
     expect(topLevel.receipt.threadId).toBeUndefined();
+  });
+
+  it("delivers media-only remote URLs and rejects non-web media before provider access", async () => {
+    const cfg = createGoogleChatCfg();
+    sendGoogleChatMessageMock.mockResolvedValue({
+      messageName: "spaces/AAA/messages/msg-media",
+    });
+
+    await googlechatMessageAdapter.send?.media?.({
+      cfg,
+      to: "spaces/AAA",
+      text: "",
+      mediaUrl: "https://example.invalid/image.png",
+    });
+    expect(requireMockArg(sendGoogleChatMessageMock)).toMatchObject({
+      text: "Attachment: https://example.invalid/image.png",
+    });
+
+    sendGoogleChatMessageMock.mockClear();
+    await expect(
+      googlechatMessageAdapter.send?.media?.({
+        cfg,
+        to: "spaces/AAA",
+        text: "caption",
+        mediaUrl: "/tmp/image.png",
+      }),
+    ).rejects.toThrow("Google Chat outbound attachments require remote HTTP(S) URLs");
+    expect(sendGoogleChatMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects local media during payload normalization before durable queue staging", () => {
+    const normalizePayload = googlechatOutboundAdapter.base.normalizePayload;
+
+    expect(() =>
+      normalizePayload({
+        payload: {
+          text: "caption",
+          mediaUrls: ["https://example.invalid/image.png", "/tmp/private.png"],
+        },
+      }),
+    ).toThrow("Google Chat outbound attachments require remote HTTP(S) URLs");
+    expect(resolveGoogleChatAccountMock).not.toHaveBeenCalled();
+    expect(sendGoogleChatMessageMock).not.toHaveBeenCalled();
   });
 
   it("renders and chunks outbound text without requiring Google Chat runtime initialization", () => {

@@ -19,6 +19,7 @@ import {
   listResolvedDirectoryUserEntriesFromAllowFrom,
 } from "openclaw/plugin-sdk/directory-runtime";
 import { createLazyRuntimeNamedExport } from "openclaw/plugin-sdk/lazy-runtime";
+import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { shouldSuppressGoogleChatManualExecApprovalFollowupPayload } from "./approval-card-actions.js";
@@ -39,6 +40,10 @@ import {
   sanitizeGoogleChatText,
 } from "./format.js";
 import { resolveGoogleChatGroupRequireMention } from "./group-policy.js";
+import {
+  formatGoogleChatTextWithMediaLinks,
+  validateGoogleChatRemoteMediaUrls,
+} from "./outbound-media-links.js";
 
 const loadGoogleChatChannelRuntime = createLazyRuntimeNamedExport(
   () => import("./channel.runtime.js"),
@@ -188,6 +193,47 @@ export const googlechatPairingTextAdapter = {
   },
 };
 
+type GoogleChatOutboundTextParams = {
+  cfg: OpenClawConfig;
+  to: string;
+  text: string;
+  accountId?: string | null;
+  replyToId?: string | null;
+  threadId?: string | number | null;
+};
+
+async function sendGoogleChatOutboundText(
+  params: GoogleChatOutboundTextParams & { kind: MessageReceiptPartKind },
+) {
+  const account = resolveGoogleChatAccount({
+    cfg: params.cfg,
+    accountId: params.accountId,
+  });
+  const space = await resolveGoogleChatOutboundSpace({ account, target: params.to });
+  const thread =
+    typeof params.threadId === "number"
+      ? String(params.threadId)
+      : (params.threadId ?? params.replyToId ?? undefined);
+  const { sendGoogleChatMessage } = await loadGoogleChatChannelRuntime();
+  const result = await sendGoogleChatMessage({
+    account,
+    space,
+    text: params.text,
+    thread,
+  });
+  const messageId = result?.messageName ?? "";
+  return {
+    messageId,
+    chatId: space,
+    receipt: createGoogleChatSendReceipt({
+      messageId,
+      chatId: space,
+      threadId: result?.threadName ?? thread,
+      kind: params.kind,
+    }),
+  };
+}
+
 export const googlechatOutboundAdapter = {
   base: {
     deliveryMode: "direct" as const,
@@ -195,8 +241,13 @@ export const googlechatOutboundAdapter = {
     chunkerMode: "markdown" as const,
     textChunkLimit: GOOGLE_CHAT_FORMAT_PROFILE.chunk.limit,
     sanitizeText: ({ text }: { text: string }) => sanitizeGoogleChatText(text),
-    normalizePayload: ({ payload }: { payload: ReplyPayload }) =>
-      shouldSuppressGoogleChatManualExecApprovalFollowupPayload(payload) ? null : payload,
+    normalizePayload: ({ payload }: { payload: ReplyPayload }) => {
+      if (shouldSuppressGoogleChatManualExecApprovalFollowupPayload(payload)) {
+        return null;
+      }
+      validateGoogleChatRemoteMediaUrls(resolveSendableOutboundReplyParts(payload).mediaUrls);
+      return payload;
+    },
     resolveTarget: ({ to }: { to?: string }) => {
       const trimmed = normalizeOptionalString(to) ?? "";
 
@@ -219,47 +270,8 @@ export const googlechatOutboundAdapter = {
   },
   attachedResults: {
     channel: "googlechat" as const,
-    sendText: async ({
-      cfg,
-      to,
-      text,
-      accountId,
-      replyToId,
-      threadId,
-    }: {
-      cfg: OpenClawConfig;
-      to: string;
-      text: string;
-      accountId?: string | null;
-      replyToId?: string | null;
-      threadId?: string | number | null;
-    }) => {
-      const account = resolveGoogleChatAccount({
-        cfg,
-        accountId,
-      });
-      const space = await resolveGoogleChatOutboundSpace({ account, target: to });
-      const thread =
-        typeof threadId === "number" ? String(threadId) : (threadId ?? replyToId ?? undefined);
-      const { sendGoogleChatMessage } = await loadGoogleChatChannelRuntime();
-      const result = await sendGoogleChatMessage({
-        account,
-        space,
-        text,
-        thread,
-      });
-      const messageId = result?.messageName ?? "";
-      return {
-        messageId,
-        chatId: space,
-        receipt: createGoogleChatSendReceipt({
-          messageId,
-          chatId: space,
-          threadId: result?.threadName ?? thread,
-          kind: "text",
-        }),
-      };
-    },
+    sendText: async (params: GoogleChatOutboundTextParams) =>
+      await sendGoogleChatOutboundText({ ...params, kind: "text" }),
   },
 };
 
@@ -268,11 +280,23 @@ export const googlechatMessageAdapter = defineChannelMessageAdapter({
   durableFinal: {
     capabilities: {
       text: true,
+      media: true,
       thread: true,
       messageSendingHooks: true,
     },
   },
   send: {
     text: googlechatOutboundAdapter.attachedResults.sendText,
+    media: async ({ mediaUrl, ...ctx }) => {
+      const text = formatGoogleChatTextWithMediaLinks({
+        text: ctx.text,
+        mediaUrls: [mediaUrl],
+      });
+      return await sendGoogleChatOutboundText({
+        ...ctx,
+        text,
+        kind: "media",
+      });
+    },
   },
 });
