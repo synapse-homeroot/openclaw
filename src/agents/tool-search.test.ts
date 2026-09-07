@@ -277,11 +277,6 @@ describe("Tool Search", () => {
       error: "provide exactly one of query or queries",
     },
     {
-      label: "mixed single and batch request",
-      input: { query: "calendar", queries: [{ query: "Slack" }] },
-      error: "provide exactly one of query or queries",
-    },
-    {
       label: "empty batch",
       input: { queries: [] },
       error: "queries must be a non-empty array",
@@ -298,6 +293,33 @@ describe("Tool Search", () => {
     },
   ])("rejects $label", async ({ input, error }) => {
     await expect(limitSearchTool.execute("call-invalid-batch", input)).rejects.toThrow(error);
+  });
+
+  it("prefers one scalar search when query and stray queries are both present", async () => {
+    const catalogRef = createToolSearchCatalogRef();
+    registerHeadlessToolSearchCatalog({
+      catalogRef,
+      tools: [
+        pluginTool("fake_scalar_target_one", "scalar target surface one"),
+        pluginTool("fake_scalar_target_two", "scalar target surface two"),
+      ],
+    });
+    const searchTool = expectDefined(
+      createToolSearchTools({ catalogRef }).find((tool) => tool.name === TOOL_SEARCH_RAW_TOOL_NAME),
+      "mixed request search tool",
+    );
+
+    const result = await searchTool.execute("call-mixed-request", {
+      query: "scalar target",
+      queries: [{ query: "unrelated batch query", limit: 8 }],
+      options: { limit: 1 },
+    });
+
+    expect(result.details).toEqual([
+      expect.objectContaining({ id: expect.stringContaining("fake_scalar_target") }),
+      expect.objectContaining({ id: expect.stringContaining("fake_scalar_target") }),
+    ]);
+    expect(catalogRef.current?.searchCount).toBe(1);
   });
 
   it.each(["", "  "])("preserves scalar empty-query compatibility for %j", async (query) => {

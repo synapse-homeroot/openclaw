@@ -49,6 +49,12 @@ function readToolSearchArgs(
 
 export function readToolSearchRequest(args: unknown, config: ToolSearchConfig): ToolSearchRequest {
   const params = asToolParamsRecord(args);
+  if (typeof params.query === "string") {
+    return {
+      kind: "single",
+      search: readToolSearchArgs({ query: params.query, limit: params.limit }, config),
+    };
+  }
   const hasQuery = params.query !== undefined;
   const hasQueries = params.queries !== undefined;
   if (hasQuery === hasQueries) {
