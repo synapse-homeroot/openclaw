@@ -33,6 +33,24 @@ type MatrixIngressPrefixConfig = {
   claimInboundReplay: (handle: ReplayClaimHandle) => void;
 };
 
+/** Cold-start policy: without persisted sync state, events from before startup are history. */
+export function isMatrixPreStartupEvent(params: {
+  dropPreStartupMessages: boolean;
+  eventTs?: number;
+  eventAge?: number;
+  startupMs: number;
+  startupGraceMs?: number;
+}): boolean {
+  if (!params.dropPreStartupMessages) {
+    return false;
+  }
+  const graceMs = params.startupGraceMs ?? 0;
+  if (typeof params.eventTs === "number") {
+    return params.eventTs < params.startupMs - graceMs;
+  }
+  return typeof params.eventAge === "number" && params.eventAge > graceMs;
+}
+
 export async function readMatrixIngressPrefix(config: MatrixIngressPrefixConfig) {
   const {
     client,
@@ -55,13 +73,10 @@ export async function readMatrixIngressPrefix(config: MatrixIngressPrefixConfig)
   if (senderId === selfUserId) {
     return undefined;
   }
-  if (dropPreStartupMessages) {
-    if (typeof eventTs === "number" && eventTs < startupMs - startupGraceMs) {
-      return undefined;
-    }
-    if (typeof eventTs !== "number" && typeof eventAge === "number" && eventAge > startupGraceMs) {
-      return undefined;
-    }
+  if (
+    isMatrixPreStartupEvent({ dropPreStartupMessages, eventTs, eventAge, startupMs, startupGraceMs })
+  ) {
+    return undefined;
   }
 
   const content = event.content as RoomMessageEventContent;
